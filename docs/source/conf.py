@@ -6,7 +6,7 @@ import os
 project = 'YosysHQ Yosys'
 author = 'YosysHQ GmbH'
 copyright ='2025 YosysHQ GmbH'
-yosys_ver = "0.51"
+yosys_ver = "0.52"
 
 # select HTML theme
 html_theme = 'furo-ys'
@@ -16,15 +16,17 @@ html_theme_options: dict[str] = {
     "source_branch": "main",
     "source_directory": "docs/source/",
 }
+html_context: dict[str] = {}
 
 # try to fix the readthedocs detection
-html_context: dict[str] = {
-    "READTHEDOCS": True,
-    "display_github": True,
-    "github_user": "YosysHQ",
-    "github_repo": "yosys",
-    "slug": "yosys",
-}
+if os.getenv("READTHEDOCS"):
+    html_context.update({
+        "READTHEDOCS": True,
+        "display_github": True,
+        "github_user": "YosysHQ",
+        "github_repo": "yosys",
+        "slug": "yosys",
+    })
 
 # override source_branch if not main
 git_slug = os.getenv("READTHEDOCS_VERSION_NAME")

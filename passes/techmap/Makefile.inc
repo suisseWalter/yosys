@@ -6,6 +6,7 @@ OBJS += passes/techmap/dfflibmap.o
 OBJS += passes/techmap/maccmap.o
 OBJS += passes/techmap/booth.o
 OBJS += passes/techmap/libparse.o
+OBJS += passes/techmap/libcache.o
 
 ifeq ($(ENABLE_ABC),1)
 OBJS += passes/techmap/abc.o
@@ -61,5 +62,5 @@ EXTRA_OBJS += passes/techmap/filterlib.o
 
 $(PROGRAM_PREFIX)yosys-filterlib$(EXE): passes/techmap/filterlib.o
 	$(Q) mkdir -p $(dir $@)
-	$(P) $(CXX) -o $(PROGRAM_PREFIX)yosys-filterlib$(EXE) $(LINKFLAGS) $^ $(LIBS)
+	$(P) $(CXX) -o $(PROGRAM_PREFIX)yosys-filterlib$(EXE) $(LINKFLAGS) $^ $(EXE_LIBS) $(LIBS)
 endif
