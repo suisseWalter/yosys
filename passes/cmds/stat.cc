@@ -32,6 +32,7 @@ PRIVATE_NAMESPACE_BEGIN
 struct cell_area_t {
 	double area;
 	bool is_sequential;
+	double sequential_area;
 };
 
 struct statdata_t
@@ -81,13 +82,14 @@ struct statdata_t
 	#undef X
 	}
 
-	statdata_t(RTLIL::Design *design, RTLIL::Module *mod, bool width_mode, const dict<IdString, cell_area_t> &cell_area, string techname)
+	statdata_t(const RTLIL::Design *design,const RTLIL::Module *mod, bool width_mode, dict<IdString, cell_area_t> &cell_area, string techname)
 	{
 		tech = techname;
 
 	#define X(_name) _name = 0;
 		STAT_NUMERIC_MEMBERS
 	#undef X
+		//additional_cell_area 
 
 		for (auto wire : mod->selected_wires())
 		{
@@ -111,11 +113,11 @@ struct statdata_t
 			num_memories++;
 			num_memory_bits += it.second->width * it.second->size;
 		}
-
 		for (auto cell : mod->selected_cells())
 		{
 			RTLIL::IdString cell_type = cell->type;
-
+			//printf("asdf\n");
+			//printf("cell_type: %s\n", cell_type.c_str());
 			if (width_mode)
 			{
 				if (cell_type.in(ID($not), ID($pos), ID($neg),
@@ -144,26 +146,52 @@ struct statdata_t
 			}
 
 			if (!cell_area.empty()) {
+				//for(auto &it : cell_area) {
+					//printf("name, area : %s, %f\n", it.first.c_str(),it.second.area);
+				//}
+				//printf("cell_type: %s\n", cell_type.c_str());
+				//printf("cell_with_area: %d\n", cell_area.at(0));
 				if (cell_area.count(cell_type)) {
 					cell_area_t cell_data = cell_area.at(cell_type);
+					//printf("cell %s area: %f", cell_type.c_str(), cell_data.area);
 					if (cell_data.is_sequential) {
-						sequential_area += cell_data.area;
+						//sequential_area += cell_data.area;
 					}
 					area += cell_data.area;
+					sequential_area += cell_data.sequential_area;
+					
 				}
 				else {
+					printf("cell %s area: unknown\n", cell_type.c_str());
 					unknown_cell_area.insert(cell_type);
 				}
 			}
+			
 
 			num_cells++;
 			num_cells_by_type[cell_type]++;
 		}
+		
 
 		for (auto &it : mod->processes) {
 			if (!design->selected(mod, it.second))
 				continue;
 			num_processes++;
+		}
+		RTLIL::IdString cell_name = mod->name;
+		auto s = cell_name.str();
+		
+		//if (cell_area.count(s)==0) {
+		cell_area_t a = {area, false,sequential_area};
+		auto  str_name = "" + s;
+		cell_area[str_name] = a;
+		printf("%s\n",str_name.c_str());
+		//}
+		
+		if (unknown_cell_area.count(cell_name)){
+			//printf("cell %s area: %f", cell_name.c_str(), cell_area.at(cell_name).area);
+			printf("cell %s area: %f", cell_name.c_str(), cell_area.at(cell_name).area);
+			
 		}
 	}
 
@@ -298,6 +326,7 @@ struct statdata_t
 		log("         \"num_cells\":         %u,\n", num_cells);
 		if (area != 0) {
 			log("         \"area\":              %f,\n", area);
+			log("         \"sequential_area\":    %f,\n", sequential_area);
 		}
 		log("         \"num_cells_by_type\": {\n");
 		bool first_line = true;
@@ -336,9 +365,10 @@ statdata_t hierarchy_worker(std::map<RTLIL::IdString, statdata_t> &mod_stat, RTL
 	for (auto &it : num_cells_by_type)
 		if (mod_stat.count(it.first) > 0) {
 			if (!quiet)
-				log("     %*s%-*s %6u\n", 2*level, "", 26-2*level, log_id(it.first), it.second);
+				log("     %*s%-*s %6u \n", 2*level, "", 26-2*level, log_id(it.first), it.second);
 			mod_data = mod_data + hierarchy_worker(mod_stat, it.first, level+1, quiet) * it.second;
 			mod_data.num_cells -= it.second;
+			
 		} else {
 			mod_data.num_cells_by_type[it.first] += it.second;
 		}
@@ -363,7 +393,8 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 		const LibertyAst *ar = cell->find("area");
 		bool is_flip_flop = cell->find("ff") != nullptr;
 		if (ar != nullptr && !ar->value.empty())
-			cell_area["\\" + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop};
+			//TODO why should there be a \ in the beginning of lib based cells?
+			cell_area["" + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop, atof( is_flip_flop ? ar->value.c_str() : "0")};
 	}
 }
 
@@ -453,16 +484,42 @@ struct StatPass : public Pass {
 			log("   \"modules\": {\n");
 		}
 
+		for (auto mod : design->modules()){
+			
+			
+			auto con = mod->connections();
+			auto internal_cells = mod->cells();
+			/* 
+			for (auto c : internal_cells) {
+				auto internal_cells_module = design->modules_[c->name];
+
+			} */
+			//statdata_t datavoid(design, mod, width_mode, cell_area, techname);
+		}
+		int count = 0;
+		int known_cells = cell_area.size();
+
+		while (known_cells > count++) {
+			known_cells = cell_area.size();
+			//printf("known_cells: %d\n", known_cells);
+			for (auto mod : design->modules()){
+				statdata_t(design, mod, width_mode, cell_area, techname);
+			}
+			//printf("number_of_unknown_cells: %d\n", data3.unknown_cell_area.size());
+			//printf("known cells %i, count: %i",known_cells,count);
+			//count+=1;
+		}
+		
+
 		bool first_module = true;
 		for (auto mod : design->selected_modules())
 		{
 			if (!top_mod && design->full_selection())
 				if (mod->get_bool_attribute(ID::top))
 					top_mod = mod;
-
 			statdata_t data(design, mod, width_mode, cell_area, techname);
 			mod_stat[mod->name] = data;
-
+			printf("area: %f\n", data.area);
 			if (json_mode) {
 				data.log_data_json(mod->name.c_str(), first_module);
 				first_module = false;
