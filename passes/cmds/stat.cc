@@ -25,6 +25,7 @@
 #include "kernel/cost.h"
 #include "kernel/gzip.h"
 #include "libs/json11/json11.hpp"
+#include <charconv>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -32,6 +33,8 @@ PRIVATE_NAMESPACE_BEGIN
 struct cell_area_t {
 	double area;
 	bool is_sequential;
+	vector<double> single_parameter_area;
+	vector<vector<double>> double_parameter_area;
 };
 
 struct statdata_t {
@@ -180,6 +183,33 @@ struct statdata_t {
 			}
 
 			if (!cell_area.empty()) {
+				//check if cell_area provides a area calculator
+				if (cell_area.count(cell->type)){
+					cell_area_t cell_data = cell_area.at(cell->type);
+					if (cell_data.single_parameter_area.size() > 0) {
+						//assume that we just take the max of the A,B,Y ports
+						
+						int width_a = cell->hasPort(ID::A) ? GetSize(cell->getPort(ID::A)) : 0;
+						int width_b = cell->hasPort(ID::B) ? GetSize(cell->getPort(ID::B)) : 0;
+						int width_y = cell->hasPort(ID::Y) ? GetSize(cell->getPort(ID::Y)) : 0;
+						int width_q = cell->hasPort(ID::Q) ? GetSize(cell->getPort(ID::Q)) : 0;
+						int max_width = max<int>({width_a, width_b, width_y, width_q});
+						if (!cell_area.count(cell_type)) {
+							cell_area[cell_type]=cell_data;
+						}
+						if (cell_data.single_parameter_area.size() > max_width-1) {
+							cell_area.at(cell_type).area = cell_data.single_parameter_area.at(max_width-1);
+						} else {
+							printf("too small single_parameter_area %s %d %f\n", cell_type.c_str(), max_width, cell_data.single_parameter_area.back());
+							cell_area.at(cell_type).area = cell_data.single_parameter_area.back();
+						}
+						//printf("single_paramter_extraction %s %d %f\n", cell_type.c_str(), max_width, cell_area.at(cell_type).area);
+						
+					}
+				}
+
+
+
 				if (cell_area.count(cell_type)) {
 					cell_area_t cell_data = cell_area.at(cell_type);
 					if (cell_data.is_sequential) {
@@ -479,10 +509,28 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 
 		const LibertyAst *ar = cell->find("area");
 		bool is_flip_flop = cell->find("ff") != nullptr;
+		vector<double> single_parameter_area;
+		const LibertyAst *sar = cell->find("single_area_parameterised");
+		if (sar != nullptr ){
+			printf("value: %s\n",sar->value.c_str());
+			printf("args1: %s\n",sar->args[0].c_str());
+			for (const auto& s : sar->args) {
+				double value = 0;
+				auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+				// ec != std::errc() means parse error, or ptr didn't consume entire string
+				if (ec != std::errc() || ptr != s.data() + s.size())
+					break;
+				single_parameter_area.push_back(value);
+			}
+			if (single_parameter_area.size() == 0)
+				printf("error: %s\n",sar->args[single_parameter_area.size()-1].c_str());
+				//check if it is a double parameterised area
+			printf("size: %d\n",single_parameter_area.size());
+		}
 
 		if (ar != nullptr && !ar->value.empty()) {
 			string prefix = cell->args[0].substr(0, 1) == "$" ? "" : "\\";
-			cell_area[prefix + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop};
+			cell_area[prefix + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop,single_parameter_area,vector<vector<double>>()};
 		}
 
 	}
