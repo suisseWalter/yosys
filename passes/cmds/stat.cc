@@ -32,67 +32,107 @@ PRIVATE_NAMESPACE_BEGIN
 struct cell_area_t {
 	double area;
 	bool is_sequential;
-	double sequential_area;
 };
 
-struct statdata_t
-{
-	#define STAT_INT_MEMBERS X(num_wires) X(num_wire_bits) X(num_pub_wires) X(num_pub_wire_bits) \
-			X(num_ports) X(num_port_bits) X(num_memories) X(num_memory_bits) X(num_cells) \
-			X(num_processes)
+struct statdata_t {
+#define STAT_INT_MEMBERS                                                                                                                             \
+	X(num_wires)                                                                                                                                 \
+	X(num_wire_bits)                                                                                                                             \
+	X(num_pub_wires) X(num_pub_wire_bits) X(num_ports) X(num_port_bits) X(num_memories) X(num_memory_bits) X(num_cells) X(num_processes)
 
-	#define STAT_NUMERIC_MEMBERS STAT_INT_MEMBERS X(area) X(sequential_area)
+#define STAT_NUMERIC_MEMBERS STAT_INT_MEMBERS X(area) X(sequential_area)
 
-	#define X(_name) unsigned int _name;
+#define X(_name) unsigned int _name;
 	STAT_INT_MEMBERS
-	#undef X
+#undef X
 	double area = 0;
 	double sequential_area = 0;
+	double local_area = 0;
+	double module_area = 0;
+	int num_modules = 0;
+	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_modules_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> modules_area_by_type;
+	int num_local_cells = 0;
+	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_local_cells_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> local_cells_area_by_type;
 	string tech;
 
 	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_cells_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> cells_area_by_type;
 	std::set<RTLIL::IdString> unknown_cell_area;
 
 	statdata_t operator+(const statdata_t &other) const
 	{
 		statdata_t sum = other;
-	#define X(_name) sum._name += _name;
+#define X(_name) sum._name += _name;
 		STAT_NUMERIC_MEMBERS
-	#undef X
+#undef X
 		for (auto &it : num_cells_by_type)
 			sum.num_cells_by_type[it.first] += it.second;
 		return sum;
 	}
-
 	statdata_t operator*(unsigned int other) const
 	{
 		statdata_t sum = *this;
-	#define X(_name) sum._name *= other;
+#define X(_name) sum._name *= other;
 		STAT_NUMERIC_MEMBERS
-	#undef X
+#undef X
 		for (auto &it : sum.num_cells_by_type)
 			it.second *= other;
 		return sum;
 	}
+	statdata_t add(const statdata_t &other)
+	{
+#define X(_name) _name += other._name;
+		STAT_NUMERIC_MEMBERS
+#undef X
+		for (auto &it : other.num_cells_by_type) {
+			if (num_cells_by_type.count(it.first))
+				num_cells_by_type[it.first] += it.second;
+			else
+				num_cells_by_type[it.first] = it.second;
+		}
+		for (auto &it : other.modules_area_by_type) {
+			if (modules_area_by_type.count(it.first))
+				modules_area_by_type[it.first] += it.second;
+			else
+				modules_area_by_type[it.first] = it.second;
+		}
+		for (auto &it : other.cells_area_by_type) {
+			if (cells_area_by_type.count(it.first))
+				cells_area_by_type[it.first] += it.second;
+			else
+				cells_area_by_type[it.first] = it.second;
+		}
+		return *this;
+	}
 
 	statdata_t()
 	{
-	#define X(_name) _name = 0;
+#define X(_name) _name = 0;
 		STAT_NUMERIC_MEMBERS
-	#undef X
+#undef X
 	}
 
-	statdata_t(const RTLIL::Design *design,const RTLIL::Module *mod, bool width_mode, dict<IdString, cell_area_t> &cell_area, string techname)
+	statdata_t(cell_area_t &cell_data, string techname)
+	{
+		tech = techname;
+		area = cell_data.area;
+		if (cell_data.is_sequential) {
+			sequential_area = cell_data.area;
+		}
+	}
+
+	statdata_t(const RTLIL::Design *design, const RTLIL::Module *mod, bool width_mode, dict<IdString, cell_area_t> &cell_area, string techname)
 	{
 		tech = techname;
 
-	#define X(_name) _name = 0;
+#define X(_name) _name = 0;
 		STAT_NUMERIC_MEMBERS
-	#undef X
-		//additional_cell_area 
+#undef X
+		// additional_cell_area
 
-		for (auto wire : mod->selected_wires())
-		{
+		for (auto wire : mod->selected_wires()) {
 			if (wire->port_input || wire->port_output) {
 				num_ports++;
 				num_port_bits += wire->width;
@@ -113,65 +153,59 @@ struct statdata_t
 			num_memories++;
 			num_memory_bits += it.second->width * it.second->size;
 		}
-		for (auto cell : mod->selected_cells())
-		{
+		for (auto cell : mod->selected_cells()) {
 			RTLIL::IdString cell_type = cell->type;
-			//printf("asdf\n");
-			//printf("cell_type: %s\n", cell_type.c_str());
-			if (width_mode)
-			{
-				if (cell_type.in(ID($not), ID($pos), ID($neg),
-						ID($logic_not), ID($logic_and), ID($logic_or),
-						ID($reduce_and), ID($reduce_or), ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool),
-						ID($lut), ID($and), ID($or), ID($xor), ID($xnor),
-						ID($shl), ID($shr), ID($sshl), ID($sshr), ID($shift), ID($shiftx),
-						ID($lt), ID($le), ID($eq), ID($ne), ID($eqx), ID($nex), ID($ge), ID($gt),
-						ID($add), ID($sub), ID($mul), ID($div), ID($mod), ID($divfloor), ID($modfloor), ID($pow), ID($alu))) {
+			if (width_mode) {
+				if (cell_type.in(ID($not), ID($pos), ID($neg), ID($logic_not), ID($logic_and), ID($logic_or), ID($reduce_and),
+						 ID($reduce_or), ID($reduce_xor), ID($reduce_xnor), ID($reduce_bool), ID($lut), ID($and), ID($or),
+						 ID($xor), ID($xnor), ID($shl), ID($shr), ID($sshl), ID($sshr), ID($shift), ID($shiftx), ID($lt),
+						 ID($le), ID($eq), ID($ne), ID($eqx), ID($nex), ID($ge), ID($gt), ID($add), ID($sub), ID($mul),
+						 ID($div), ID($mod), ID($divfloor), ID($modfloor), ID($pow), ID($alu))) {
 					int width_a = cell->hasPort(ID::A) ? GetSize(cell->getPort(ID::A)) : 0;
 					int width_b = cell->hasPort(ID::B) ? GetSize(cell->getPort(ID::B)) : 0;
 					int width_y = cell->hasPort(ID::Y) ? GetSize(cell->getPort(ID::Y)) : 0;
 					cell_type = stringf("%s_%d", cell_type.c_str(), max<int>({width_a, width_b, width_y}));
-				}
-				else if (cell_type.in(ID($mux), ID($pmux)))
+				} else if (cell_type.in(ID($mux), ID($pmux)))
 					cell_type = stringf("%s_%d", cell_type.c_str(), GetSize(cell->getPort(ID::Y)));
 				else if (cell_type == ID($bmux))
-					cell_type = stringf("%s_%d_%d", cell_type.c_str(), GetSize(cell->getPort(ID::Y)), GetSize(cell->getPort(ID::S)));
+					cell_type =
+					  stringf("%s_%d_%d", cell_type.c_str(), GetSize(cell->getPort(ID::Y)), GetSize(cell->getPort(ID::S)));
 				else if (cell_type == ID($demux))
-					cell_type = stringf("%s_%d_%d", cell_type.c_str(), GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::S)));
-				else if (cell_type.in(
-						ID($sr), ID($ff), ID($dff), ID($dffe), ID($dffsr), ID($dffsre),
-						ID($adff), ID($adffe), ID($sdff), ID($sdffe), ID($sdffce),
-						ID($aldff), ID($aldffe), ID($dlatch), ID($adlatch), ID($dlatchsr)))
+					cell_type =
+					  stringf("%s_%d_%d", cell_type.c_str(), GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::S)));
+				else if (cell_type.in(ID($sr), ID($ff), ID($dff), ID($dffe), ID($dffsr), ID($dffsre), ID($adff), ID($adffe),
+						      ID($sdff), ID($sdffe), ID($sdffce), ID($aldff), ID($aldffe), ID($dlatch), ID($adlatch),
+						      ID($dlatchsr)))
 					cell_type = stringf("%s_%d", cell_type.c_str(), GetSize(cell->getPort(ID::Q)));
 			}
 
 			if (!cell_area.empty()) {
-				//for(auto &it : cell_area) {
-					//printf("name, area : %s, %f\n", it.first.c_str(),it.second.area);
-				//}
-				//printf("cell_type: %s\n", cell_type.c_str());
-				//printf("cell_with_area: %d\n", cell_area.at(0));
 				if (cell_area.count(cell_type)) {
 					cell_area_t cell_data = cell_area.at(cell_type);
-					//printf("cell %s area: %f", cell_type.c_str(), cell_data.area);
 					if (cell_data.is_sequential) {
-						//sequential_area += cell_data.area;
+						sequential_area += cell_data.area;
 					}
 					area += cell_data.area;
-					sequential_area += cell_data.sequential_area;
-					
-				}
-				else {
-					printf("cell %s area: unknown\n", cell_type.c_str());
+					num_cells++;
+					num_cells_by_type[cell_type]++;
+					cells_area_by_type[cell_type] += cell_data.area;
+					local_cells_area_by_type[cell_type] += cell_data.area;
+					local_area += cell_data.area;
+					num_local_cells++;
+					num_local_cells_by_type[cell_type]++;
+
+				} else {
 					unknown_cell_area.insert(cell_type);
 				}
+			} else {
+				num_cells++;
+				num_cells_by_type[cell_type]++;
+				cells_area_by_type[cell_type] = 0;
+				num_local_cells++;
+				num_local_cells_by_type[cell_type]++;
+				local_cells_area_by_type[cell_type] = 0;
 			}
-			
-
-			num_cells++;
-			num_cells_by_type[cell_type]++;
 		}
-		
 
 		for (auto &it : mod->processes) {
 			if (!design->selected(mod, it.second))
@@ -180,18 +214,9 @@ struct statdata_t
 		}
 		RTLIL::IdString cell_name = mod->name;
 		auto s = cell_name.str();
-		
-		//if (cell_area.count(s)==0) {
-		cell_area_t a = {area, false,sequential_area};
-		auto  str_name = "" + s;
-		cell_area[str_name] = a;
-		printf("%s\n",str_name.c_str());
-		//}
-		
-		if (unknown_cell_area.count(cell_name)){
-			//printf("cell %s area: %f", cell_name.c_str(), cell_area.at(cell_name).area);
+
+		if (unknown_cell_area.count(cell_name)) {
 			printf("cell %s area: %f", cell_name.c_str(), cell_area.at(cell_name).area);
-			
 		}
 	}
 
@@ -265,42 +290,57 @@ struct statdata_t
 		return tran_cnt;
 	}
 
-	void log_data(RTLIL::IdString mod_name, bool top_mod)
+	void print_log_line(string name, unsigned int count_local, double area_local, unsigned int count_global, double area_global, int spacer = 0)
 	{
-		log("   Number of wires:             %6u\n", num_wires);
-		log("   Number of wire bits:         %6u\n", num_wire_bits);
-		log("   Number of public wires:      %6u\n", num_pub_wires);
-		log("   Number of public wire bits:  %6u\n", num_pub_wire_bits);
-		log("   Number of ports:             %6u\n", num_ports);
-		log("   Number of port bits:         %6u\n", num_port_bits);
-		log("   Number of memories:          %6u\n", num_memories);
-		log("   Number of memory bits:       %6u\n", num_memory_bits);
-		log("   Number of processes:         %6u\n", num_processes);
-		log("   Number of cells:             %6u\n", num_cells);
-		for (auto &it : num_cells_by_type)
-			if (it.second)
-				log("     %-26s %6u\n", log_id(it.first), it.second);
 
+		log(" %8G %8G %8G %8G %*s%-s \n", double(count_global), area_global, double(count_local), area_local, 2 * spacer, "", name.c_str());
+	}
+
+	void log_data(RTLIL::IdString mod_name, bool top_mod, bool global = false)
+	{
+		log(" %8s %8s %8s %8s \n", "g count", "g area", "l count", "l area");
+		print_log_line("wires", 0, 0, num_wires, 0);
+		print_log_line("wire bits", 0, 0, num_wire_bits, 0);
+		print_log_line("public wires", 0, 0, num_pub_wires, 0);
+		print_log_line("public wire bits", 0, 0, num_pub_wire_bits, 0);
+		print_log_line("ports", 0, 0, num_ports, 0);
+		print_log_line("port bits", 0, 0, num_port_bits, 0);
+		print_log_line("memories", 0, 0, num_memories, 0);
+		print_log_line("memory bits", 0, 0, num_memory_bits, 0);
+		print_log_line("processes", 0, 0, num_processes, 0);
+		print_log_line("cells", num_local_cells, local_area, num_cells, area);
+		for (auto &it : num_cells_by_type)
+			if (it.second) {
+				auto name = string(log_id(it.first));
+				print_log_line(name, num_local_cells_by_type.count(it.first) ? num_local_cells_by_type.at(it.first) : 0,
+					       local_cells_area_by_type.count(it.first) ? local_cells_area_by_type.at(it.first) : 0, it.second,
+					       cells_area_by_type.at(it.first), 1);
+			}
+		if (num_modules > 0) {
+			print_log_line("modules", 0, 0, num_modules, module_area);
+			for (auto &it : num_modules_by_type)
+				if (it.second)
+					print_log_line(string(log_id(it.first)), 0, 0, it.second,
+						       modules_area_by_type.count(it.first) ? modules_area_by_type.at(it.first) : 0, 1);
+		}
 		if (!unknown_cell_area.empty()) {
 			log("\n");
 			for (auto cell_type : unknown_cell_area)
-				log("   Area for cell type %s is unknown!\n", cell_type.c_str());
+				log("   Area for cell/module type %s is unknown!\n", cell_type.c_str());
 		}
 
 		if (area != 0) {
 			log("\n");
 			log("   Chip area for %smodule '%s': %f\n", (top_mod) ? "top " : "", mod_name.c_str(), area);
-			log("     of which used for sequential elements: %f (%.2f%%)\n", sequential_area, 100.0*sequential_area/area);
+			log("     of which used for sequential elements: %f (%.2f%%)\n", sequential_area, 100.0 * sequential_area / area);
 		}
 
-		if (tech == "xilinx")
-		{
+		if (tech == "xilinx") {
 			log("\n");
 			log("   Estimated number of LCs: %10u\n", estimate_xilinx_lc());
 		}
 
-		if (tech == "cmos")
-		{
+		if (tech == "cmos") {
 			bool tran_cnt_exact = true;
 			unsigned int tran_cnt = cmos_transistor_count(&tran_cnt_exact);
 
@@ -309,7 +349,7 @@ struct statdata_t
 		}
 	}
 
-	void log_data_json(const char *mod_name, bool first_module)
+	void log_data_json(const char *mod_name, bool first_module, bool global = false)
 	{
 		if (!first_module)
 			log(",\n");
@@ -323,14 +363,15 @@ struct statdata_t
 		log("         \"num_memories\":      %u,\n", num_memories);
 		log("         \"num_memory_bits\":   %u,\n", num_memory_bits);
 		log("         \"num_processes\":     %u,\n", num_processes);
-		log("         \"num_cells\":         %u,\n", num_cells);
+		log("         \"num_cells\":         %u,\n", global ? num_cells : num_local_cells);
+		log("         \"num_modules\":       %u,\n", num_modules);
 		if (area != 0) {
 			log("         \"area\":              %f,\n", area);
 			log("         \"sequential_area\":    %f,\n", sequential_area);
 		}
 		log("         \"num_cells_by_type\": {\n");
 		bool first_line = true;
-		for (auto &it : num_cells_by_type)
+		for (auto &it : global ? num_cells_by_type : num_local_cells_by_type)
 			if (it.second) {
 				if (!first_line)
 					log(",\n");
@@ -339,13 +380,22 @@ struct statdata_t
 			}
 		log("\n");
 		log("         }");
-		if (tech == "xilinx")
-		{
+		log("         \"num_modules_by_type\": {\n");
+		first_line = true;
+		for (auto &it : num_modules_by_type)
+			if (it.second) {
+				if (!first_line)
+					log(",\n");
+				log("            %s: %u", json11::Json(log_id(it.first)).dump().c_str(), it.second);
+				first_line = false;
+			}
+		log("\n");
+		log("         }");
+		if (tech == "xilinx") {
 			log(",\n");
 			log("         \"estimated_num_lc\": %u", estimate_xilinx_lc());
 		}
-		if (tech == "cmos")
-		{
+		if (tech == "cmos") {
 			bool tran_cnt_exact = true;
 			unsigned int tran_cnt = cmos_transistor_count(&tran_cnt_exact);
 			log(",\n");
@@ -359,45 +409,84 @@ struct statdata_t
 statdata_t hierarchy_worker(std::map<RTLIL::IdString, statdata_t> &mod_stat, RTLIL::IdString mod, int level, bool quiet = false)
 {
 	statdata_t mod_data = mod_stat.at(mod);
-	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_cells_by_type;
-	num_cells_by_type.swap(mod_data.num_cells_by_type);
 
-	for (auto &it : num_cells_by_type)
+	for (auto &it : mod_data.num_modules_by_type) {
 		if (mod_stat.count(it.first) > 0) {
 			if (!quiet)
-				log("     %*s%-*s %6u \n", 2*level, "", 26-2*level, log_id(it.first), it.second);
-			mod_data = mod_data + hierarchy_worker(mod_stat, it.first, level+1, quiet) * it.second;
-			mod_data.num_cells -= it.second;
-			
-		} else {
-			mod_data.num_cells_by_type[it.first] += it.second;
+				mod_data.print_log_line(string(log_id(it.first)), mod_stat.at(it.first).num_local_cells,
+							mod_stat.at(it.first).local_area, mod_stat.at(it.first).num_cells, mod_stat.at(it.first).area,
+							level);
+			hierarchy_worker(mod_stat, it.first, level + 1, quiet) * it.second;
 		}
+	}
 
+	return mod_data;
+}
+
+statdata_t hierarchy_builder(const RTLIL::Design *design, const RTLIL::Module *top_mod, std::map<RTLIL::IdString, statdata_t> &mod_stat, bool quiet,
+			     dict<IdString, cell_area_t> &cell_area, string techname)
+{
+	if (top_mod == nullptr)
+		top_mod = design->top_module();
+	statdata_t mod_data(design, top_mod, quiet, cell_area, techname);
+	for (auto cell : top_mod->selected_cells()) {
+		if (cell_area.count(cell->type) == 0) {
+			if (design->has(cell->type)) {
+				if (!(design->module(cell->type)->attributes.count(ID::blackbox))) {
+					mod_data.add(hierarchy_builder(design, design->module(cell->type), mod_stat, quiet, cell_area, techname));
+					mod_data.num_modules_by_type[cell->type]++;
+					mod_data.modules_area_by_type[cell->type] += mod_stat.at(cell->type).area;
+					mod_data.module_area += mod_stat.at(cell->type).area;
+					mod_data.num_modules++;
+					mod_data.unknown_cell_area.erase(cell->type);
+					mod_data.num_cells -= mod_data.num_cells_by_type.erase(cell->type);
+					mod_data.cells_area_by_type.erase(cell->type);
+					mod_data.num_local_cells -= mod_data.num_local_cells_by_type.erase(cell->type);
+					mod_data.local_cells_area_by_type.erase(cell->type);
+				} else {
+					// deal with blackbox cells
+					mod_data.num_modules_by_type[cell->type]++;
+					// some modules have their area as attribute
+					if (design->module(cell->type)->attributes.count(ID::area)) {
+						mod_data.modules_area_by_type[cell->type] +=
+						  double(design->module(cell->type)->attributes.at(ID::area).as_int());
+						mod_data.area += double(design->module(cell->type)->attributes.at(ID::area).as_int());
+						mod_data.unknown_cell_area.erase(cell->type);
+					}
+					mod_data.num_modules++;
+				}
+			} else {
+				// deal with unknown cells
+			}
+		}
+	}
+	mod_stat[top_mod->name] = mod_data;
 	return mod_data;
 }
 
 void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string liberty_file)
 {
-	std::istream* f = uncompressed(liberty_file.c_str());
+	std::istream *f = uncompressed(liberty_file.c_str());
 	yosys_input_files.insert(liberty_file);
 	LibertyParser libparser(*f, liberty_file);
 	delete f;
 
-	for (auto cell : libparser.ast->children)
-	{
+	for (auto cell : libparser.ast->children) {
 		if (cell->id != "cell" || cell->args.size() != 1)
 			continue;
 
 		const LibertyAst *ar = cell->find("area");
 		bool is_flip_flop = cell->find("ff") != nullptr;
-		if (ar != nullptr && !ar->value.empty())
-			//TODO why should there be a \ in the beginning of lib based cells?
-			cell_area["" + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop, atof( is_flip_flop ? ar->value.c_str() : "0")};
+
+		if (ar != nullptr && !ar->value.empty()) {
+			string prefix = cell->args[0].substr(0, 1) == "$" ? "" : "\\";
+			cell_area[prefix + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop};
+		}
 	}
 }
 
 struct StatPass : public Pass {
-	StatPass() : Pass("stat", "print some statistics") { }
+	StatPass() : Pass("stat", "print some statistics") {}
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -437,25 +526,24 @@ struct StatPass : public Pass {
 		string techname;
 
 		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++)
-		{
+		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-width") {
 				width_mode = true;
 				continue;
 			}
-			if (args[argidx] == "-liberty" && argidx+1 < args.size()) {
+			if (args[argidx] == "-liberty" && argidx + 1 < args.size()) {
 				string liberty_file = args[++argidx];
 				rewrite_filename(liberty_file);
 				read_liberty_cellarea(cell_area, liberty_file);
 				continue;
 			}
-			if (args[argidx] == "-tech" && argidx+1 < args.size()) {
+			if (args[argidx] == "-tech" && argidx + 1 < args.size()) {
 				techname = args[++argidx];
 				continue;
 			}
-			if (args[argidx] == "-top" && argidx+1 < args.size()) {
-				if (design->module(RTLIL::escape_id(args[argidx+1])) == nullptr)
-					log_cmd_error("Can't find module %s.\n", args[argidx+1].c_str());
+			if (args[argidx] == "-top" && argidx + 1 < args.size()) {
+				if (design->module(RTLIL::escape_id(args[argidx + 1])) == nullptr)
+					log_cmd_error("Can't find module %s.\n", args[argidx + 1].c_str());
 				top_mod = design->module(RTLIL::escape_id(args[++argidx]));
 				continue;
 			}
@@ -467,7 +555,7 @@ struct StatPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
-		if(!json_mode)
+		if (!json_mode)
 			log_header(design, "Printing statistics.\n");
 
 		if (techname != "" && techname != "xilinx" && techname != "cmos" && !json_mode)
@@ -482,42 +570,16 @@ struct StatPass : public Pass {
 			log("   \"modules\": {\n");
 		}
 
-		for (auto mod : design->modules()){
-			
-			
-			auto con = mod->connections();
-			auto internal_cells = mod->cells();
-			/* 
-			for (auto c : internal_cells) {
-				auto internal_cells_module = design->modules_[c->name];
+		printf("building cell area\n");
+		statdata_t top_stat = hierarchy_builder(design, top_mod, mod_stat, false, cell_area, techname);
 
-			} */
-			//statdata_t datavoid(design, mod, width_mode, cell_area, techname);
-		}
-		int count = 0;
-		int known_cells = cell_area.size();
-
-		while (known_cells > count++) {
-			known_cells = cell_area.size();
-			//printf("known_cells: %d\n", known_cells);
-			for (auto mod : design->modules()){
-				statdata_t(design, mod, width_mode, cell_area, techname);
-			}
-			//printf("number_of_unknown_cells: %d\n", data3.unknown_cell_area.size());
-			//printf("known cells %i, count: %i",known_cells,count);
-			//count+=1;
-		}
-		
-
+		printf("built hierarchy\n");
 		bool first_module = true;
-		for (auto mod : design->selected_modules())
-		{
+		for (auto mod : design->selected_modules()) {
 			if (!top_mod && design->full_selection())
 				if (mod->get_bool_attribute(ID::top))
 					top_mod = mod;
-			statdata_t data(design, mod, width_mode, cell_area, techname);
-			mod_stat[mod->name] = data;
-			printf("area: %f\n", data.area);
+			statdata_t data = mod_stat.at(mod->name);
 			if (json_mode) {
 				data.log_data_json(mod->name.c_str(), first_module);
 				first_module = false;
@@ -534,22 +596,22 @@ struct StatPass : public Pass {
 			log(top_mod == nullptr ? "   }\n" : "   },\n");
 		}
 
-		if (top_mod != nullptr)
-		{
+		if (top_mod != nullptr) {
 			if (!json_mode && GetSize(mod_stat) > 1) {
 				log("\n");
 				log("=== design hierarchy ===\n");
 				log("\n");
-				log("   %-28s %6d\n", log_id(top_mod->name), 1);
+				log(" %8s %8s %8s %8s \n", "g stdcell", "g area", "l stdcell", "l area");
+				mod_stat[top_mod->name].print_log_line(log_id(top_mod->name), 0, 0, 0, mod_stat[top_mod->name].area);
 			}
 
 			statdata_t data = hierarchy_worker(mod_stat, top_mod->name, 0, /*quiet=*/json_mode);
 
 			if (json_mode)
-				data.log_data_json("design", true);
+				data.log_data_json("design", true, true);
 			else if (GetSize(mod_stat) > 1) {
 				log("\n");
-				data.log_data(top_mod->name, true);
+				data.log_data(top_mod->name, true, true);
 			}
 
 			design->scratchpad_set_int("stat.num_wires", data.num_wires);
