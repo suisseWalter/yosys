@@ -48,10 +48,10 @@ struct statdata_t {
 	double area = 0;
 	double sequential_area = 0;
 	double local_area = 0;
-	double module_area = 0;
-	int num_modules = 0;
-	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_modules_by_type;
-	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> modules_area_by_type;
+	double instance_area = 0;
+	int num_instances = 0;
+	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_instances_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> instances_area_by_type;
 	int num_local_cells = 0;
 	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_local_cells_by_type;
 	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> local_cells_area_by_type;
@@ -92,11 +92,11 @@ struct statdata_t {
 			else
 				num_cells_by_type[it.first] = it.second;
 		}
-		for (auto &it : other.modules_area_by_type) {
-			if (modules_area_by_type.count(it.first))
-				modules_area_by_type[it.first] += it.second;
+		for (auto &it : other.instances_area_by_type) {
+			if (instances_area_by_type.count(it.first))
+				instances_area_by_type[it.first] += it.second;
 			else
-				modules_area_by_type[it.first] = it.second;
+				instances_area_by_type[it.first] = it.second;
 		}
 		for (auto &it : other.cells_area_by_type) {
 			if (cells_area_by_type.count(it.first))
@@ -298,7 +298,11 @@ struct statdata_t {
 
 	void log_data(RTLIL::IdString mod_name, bool top_mod, bool global = false)
 	{
-		log(" %8s %8s %8s %8s \n", "g count", "g area", "l count", "l area");
+		log(" %8s-%8s-%8s-%8s----%s\n", "+", "--------", "--------", "--------" , "Hierarchical number of cells, includes all the cells in instances aswell as directly in the module.");
+		log(" %8s %8s-%8s-%8s----%s\n", "|", "+", "--------", "--------","Hierarchical  area, the area including all the instances in the module.");
+		log(" %8s %8s %8s-%8s----%s\n", "|", "|", "+", "--------","Local number of cells, only the cells directly in the module.");
+		log(" %8s %8s %8s %8s----%s\n", "|", "|", "|", "+","Local area, the area of the cells directly in the module. ");
+		log(" %8s %8s %8s %8s \n", "|", "|", "|", "|");
 		print_log_line("wires", 0, 0, num_wires, 0);
 		print_log_line("wire bits", 0, 0, num_wire_bits, 0);
 		print_log_line("public wires", 0, 0, num_pub_wires, 0);
@@ -316,17 +320,17 @@ struct statdata_t {
 					       local_cells_area_by_type.count(it.first) ? local_cells_area_by_type.at(it.first) : 0, it.second,
 					       cells_area_by_type.at(it.first), 1);
 			}
-		if (num_modules > 0) {
-			print_log_line("modules", 0, 0, num_modules, module_area);
-			for (auto &it : num_modules_by_type)
+		if (num_instances > 0) {
+			print_log_line("instances", 0, 0, num_instances, instance_area);
+			for (auto &it : num_instances_by_type)
 				if (it.second)
 					print_log_line(string(log_id(it.first)), 0, 0, it.second,
-						       modules_area_by_type.count(it.first) ? modules_area_by_type.at(it.first) : 0, 1);
+						       instances_area_by_type.count(it.first) ? instances_area_by_type.at(it.first) : 0, 1);
 		}
 		if (!unknown_cell_area.empty()) {
 			log("\n");
 			for (auto cell_type : unknown_cell_area)
-				log("   Area for cell/module type %s is unknown!\n", cell_type.c_str());
+				log("   Area for cell/instance type %s is unknown!\n", cell_type.c_str());
 		}
 
 		if (area != 0) {
@@ -364,7 +368,7 @@ struct statdata_t {
 		log("         \"num_memory_bits\":   %u,\n", num_memory_bits);
 		log("         \"num_processes\":     %u,\n", num_processes);
 		log("         \"num_cells\":         %u,\n", global ? num_cells : num_local_cells);
-		log("         \"num_modules\":       %u,\n", num_modules);
+		log("         \"num_instances\":       %u,\n", num_instances);
 		if (area != 0) {
 			log("         \"area\":              %f,\n", area);
 			log("         \"sequential_area\":    %f,\n", sequential_area);
@@ -378,11 +382,9 @@ struct statdata_t {
 				log("            %s: %u", json11::Json(log_id(it.first)).dump().c_str(), it.second);
 				first_line = false;
 			}
-		log("\n");
-		log("         }");
-		log("         \"num_modules_by_type\": {\n");
+		log(",\n");
 		first_line = true;
-		for (auto &it : num_modules_by_type)
+		for (auto &it : num_instances_by_type)
 			if (it.second) {
 				if (!first_line)
 					log(",\n");
@@ -410,7 +412,7 @@ statdata_t hierarchy_worker(std::map<RTLIL::IdString, statdata_t> &mod_stat, RTL
 {
 	statdata_t mod_data = mod_stat.at(mod);
 
-	for (auto &it : mod_data.num_modules_by_type) {
+	for (auto &it : mod_data.num_instances_by_type) {
 		if (mod_stat.count(it.first) > 0) {
 			if (!quiet)
 				mod_data.print_log_line(string(log_id(it.first)), mod_stat.at(it.first).num_local_cells,
@@ -423,21 +425,21 @@ statdata_t hierarchy_worker(std::map<RTLIL::IdString, statdata_t> &mod_stat, RTL
 	return mod_data;
 }
 
-statdata_t hierarchy_builder(const RTLIL::Design *design, const RTLIL::Module *top_mod, std::map<RTLIL::IdString, statdata_t> &mod_stat, bool quiet,
+statdata_t hierarchy_builder(const RTLIL::Design *design, const RTLIL::Module *top_mod, std::map<RTLIL::IdString, statdata_t> &mod_stat, bool width_mode,
 			     dict<IdString, cell_area_t> &cell_area, string techname)
 {
 	if (top_mod == nullptr)
 		top_mod = design->top_module();
-	statdata_t mod_data(design, top_mod, quiet, cell_area, techname);
+	statdata_t mod_data(design, top_mod, width_mode, cell_area, techname);
 	for (auto cell : top_mod->selected_cells()) {
 		if (cell_area.count(cell->type) == 0) {
 			if (design->has(cell->type)) {
 				if (!(design->module(cell->type)->attributes.count(ID::blackbox))) {
-					mod_data.add(hierarchy_builder(design, design->module(cell->type), mod_stat, quiet, cell_area, techname));
-					mod_data.num_modules_by_type[cell->type]++;
-					mod_data.modules_area_by_type[cell->type] += mod_stat.at(cell->type).area;
-					mod_data.module_area += mod_stat.at(cell->type).area;
-					mod_data.num_modules++;
+					mod_data.add(hierarchy_builder(design, design->module(cell->type), mod_stat, width_mode, cell_area, techname));
+					mod_data.num_instances_by_type[cell->type]++;
+					mod_data.instances_area_by_type[cell->type] += mod_stat.at(cell->type).area;
+					mod_data.instance_area += mod_stat.at(cell->type).area;
+					mod_data.num_instances++;
 					mod_data.unknown_cell_area.erase(cell->type);
 					mod_data.num_cells -= mod_data.num_cells_by_type.erase(cell->type);
 					mod_data.cells_area_by_type.erase(cell->type);
@@ -445,15 +447,15 @@ statdata_t hierarchy_builder(const RTLIL::Design *design, const RTLIL::Module *t
 					mod_data.local_cells_area_by_type.erase(cell->type);
 				} else {
 					// deal with blackbox cells
-					mod_data.num_modules_by_type[cell->type]++;
-					// some modules have their area as attribute
+					mod_data.num_instances_by_type[cell->type]++;
+					// some instances have their area as attribute
 					if (design->module(cell->type)->attributes.count(ID::area)) {
-						mod_data.modules_area_by_type[cell->type] +=
+						mod_data.instances_area_by_type[cell->type] +=
 						  double(design->module(cell->type)->attributes.at(ID::area).as_int());
 						mod_data.area += double(design->module(cell->type)->attributes.at(ID::area).as_int());
 						mod_data.unknown_cell_area.erase(cell->type);
 					}
-					mod_data.num_modules++;
+					mod_data.num_instances++;
 				}
 			} else {
 				// deal with unknown cells
@@ -484,6 +486,7 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 			string prefix = cell->args[0].substr(0, 1) == "$" ? "" : "\\";
 			cell_area[prefix + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop};
 		}
+
 	}
 }
 
@@ -573,8 +576,8 @@ struct StatPass : public Pass {
 		}
 
 		printf("building cell area\n");
-		statdata_t top_stat = hierarchy_builder(design, top_mod, mod_stat, false, cell_area, techname);
-
+		statdata_t top_stat = hierarchy_builder(design, top_mod, mod_stat, width_mode, cell_area, techname);
+		
 		printf("built hierarchy\n");
 		bool first_module = true;
 		for (auto mod : design->selected_modules()) {
@@ -603,7 +606,11 @@ struct StatPass : public Pass {
 				log("\n");
 				log("=== design hierarchy ===\n");
 				log("\n");
-				log(" %8s %8s %8s %8s \n", "g stdcell", "g area", "l stdcell", "l area");
+				log(" %8s-%8s-%8s-%8s----%s\n", "+", "--------", "--------", "--------" , "Hierarchical number of cells, includes all the cells in instances aswell as directly in the module.");
+				log(" %8s %8s-%8s-%8s----%s\n", "|", "+", "--------", "--------","Hierarchical  area, the area including all the instances in the module.");
+				log(" %8s %8s %8s-%8s----%s\n", "|", "|", "+", "--------","Local number of cells, only the cells directly in the module.");
+				log(" %8s %8s %8s %8s----%s\n", "|", "|", "|", "+","Local area, the area of the cells directly in the module. ");
+				log(" %8s %8s %8s %8s \n", "|", "|", "|", "|");
 				mod_stat[top_mod->name].print_log_line(log_id(top_mod->name), 0, 0, 0, mod_stat[top_mod->name].area);
 			}
 
