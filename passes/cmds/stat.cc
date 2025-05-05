@@ -35,6 +35,7 @@ struct cell_area_t {
 	bool is_sequential;
 	vector<double> single_parameter_area;
 	vector<vector<double>> double_parameter_area;
+	vector<string> parameter_names;
 };
 
 struct statdata_t {
@@ -206,6 +207,38 @@ struct statdata_t {
 						//printf("single_paramter_extraction %s %d %f\n", cell_type.c_str(), max_width, cell_area.at(cell_type).area);
 						
 					}
+					vector<double> widths;
+					if (cell_data.parameter_names.size() > 0) {
+						for (auto &it : cell_data.parameter_names) {
+							if (cell->hasPort(ID(it))) {
+								int width = GetSize(cell->getPort(ID(it)));
+								widths.push_back(width);
+							} else {
+								widths.push_back(0);
+							}
+						}
+					}
+					if (cell_data.double_parameter_area.size() > 0) {
+						if (!cell_area.count(cell_type)) {
+							cell_area[cell_type]=cell_data;
+						}
+						if (widths.size() == 2) {
+							int width_a = widths.at(0);
+							int width_b = widths.at(1);
+							if (width_a > 0 && width_b > 0) {
+								if (cell_data.double_parameter_area.size() > width_a - 1 && cell_data.double_parameter_area.at(width_a - 1).size() > width_b - 1) {
+									cell_area.at(cell_type).area = cell_data.double_parameter_area.at(width_a - 1).at(width_b - 1);
+								} else {
+									printf("too small double_parameter_area %s %d %d %f\n", cell_type.c_str(), width_a, width_b, cell_data.double_parameter_area.back().back());
+									cell_area.at(cell_type).area = cell_data.double_parameter_area.back().back();
+								}
+							} else {
+								cell_area.at(cell_type).area = cell_data.area;
+							}
+						} else {
+							printf("double_paramter_extraction %s %d %f\n", cell_type.c_str(), widths.size(), cell_area.at(cell_type).area);
+						}
+					}
 				}
 
 
@@ -323,7 +356,7 @@ struct statdata_t {
 	void print_log_line(string name, unsigned int count_local, double area_local, unsigned int count_global, double area_global, int spacer = 0)
 	{
 
-		log(" %8G %8G %8G %8G %*s%-s \n", double(count_global), area_global, double(count_local), area_local, 2 * spacer, "", name.c_str());
+		log(" %8.3G %8.3G %8.3G %8.3G %*s%-s \n", double(count_global), area_global, double(count_local), area_local, 2 * spacer, "", name.c_str());
 	}
 
 	void log_data(RTLIL::IdString mod_name, bool top_mod, bool global = false)
@@ -510,10 +543,10 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 		const LibertyAst *ar = cell->find("area");
 		bool is_flip_flop = cell->find("ff") != nullptr;
 		vector<double> single_parameter_area;
+		vector<vector<double>> double_parameter_area;
+		vector<string> port_names;
 		const LibertyAst *sar = cell->find("single_area_parameterised");
 		if (sar != nullptr ){
-			printf("value: %s\n",sar->value.c_str());
-			printf("args1: %s\n",sar->args[0].c_str());
 			for (const auto& s : sar->args) {
 				double value = 0;
 				auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
@@ -525,12 +558,47 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 			if (single_parameter_area.size() == 0)
 				printf("error: %s\n",sar->args[single_parameter_area.size()-1].c_str());
 				//check if it is a double parameterised area
-			printf("size: %d\n",single_parameter_area.size());
+		}
+		const LibertyAst *dar = cell->find("double_area_parameterised");
+		if (dar != nullptr) {
+			for (const auto& s : dar->args) {
+
+				//printf("value: %s\n",sar->value.c_str());
+				printf("args1: %s\n",dar->args[0].c_str());
+
+				vector<string> sub_array;
+				std::string::size_type start = 0;
+				std::string::size_type end = s.find_first_of(" ,", start);
+				while (end != std::string::npos) {
+					sub_array.push_back(s.substr(start, end - start));
+					start = end + 1;
+					end = s.find_first_of(" ,", start);
+				}
+				sub_array.push_back(s.substr(start, end));
+
+				vector<double> cast_sub_array;
+				for (const auto& s : sub_array) {
+					double value = 0;
+					auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+					if (ec != std::errc() || ptr != s.data() + s.size())
+						break;
+					cast_sub_array.push_back(value);
+				}
+				double_parameter_area.push_back(cast_sub_array);
+				if (cast_sub_array.size() == 0)
+					printf("error: %s\n",s.c_str());
+			}
+		}
+		const LibertyAst *par = cell->find("port_names");
+		if (par != nullptr) {
+			for (const auto& s : par->args) {
+				port_names.push_back(s);
+			}
 		}
 
 		if (ar != nullptr && !ar->value.empty()) {
 			string prefix = cell->args[0].substr(0, 1) == "$" ? "" : "\\";
-			cell_area[prefix + cell->args[0]] = {/*area=*/atof(ar->value.c_str()), is_flip_flop,single_parameter_area,vector<vector<double>>()};
+			cell_area[prefix + cell->args[0]] = {atof(ar->value.c_str()), is_flip_flop,single_parameter_area,double_parameter_area,port_names};
 		}
 
 	}
