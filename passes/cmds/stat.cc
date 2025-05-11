@@ -210,16 +210,28 @@ struct statdata_t {
 					vector<double> widths;
 					if (cell_data.parameter_names.size() > 0) {
 						for (auto &it : cell_data.parameter_names) {
-							if (cell->hasPort(ID(it))) {
-								int width = GetSize(cell->getPort(ID(it)));
-								printf("width %s %s %d\n", cell_type.c_str(), it.c_str(), width);
-								printf("port %s %d\n", cell->getPort(ID(it)).as_string().c_str(), width);
+							RTLIL::IdString port_name ;
+							// TODO: there has to be a better way to do this
+							if (it == "A") {
+								port_name = ID::A;
+							} else if (it == "B") {
+								port_name = ID::B;
+							} else if (it == "Y") {
+								port_name = ID::Y;
+							} else if (it == "Q") {
+								port_name = ID::Q;
+							} else if (it == "S") {
+								port_name = ID::S;
+							} else {
+								port_name = ID(it);
+							} 
+							if (cell->hasPort(port_name)) {
+								int width = GetSize(cell->getPort(port_name));
 								widths.push_back(width);
 							} else {
 								widths.push_back(0);
 							}
 						}
-						printf("widths %s %d %d\n", cell_type.c_str(), widths.size(), widths.at(0));
 					}
 					
 					if (cell_data.double_parameter_area.size() > 0) {
