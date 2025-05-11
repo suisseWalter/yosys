@@ -212,12 +212,16 @@ struct statdata_t {
 						for (auto &it : cell_data.parameter_names) {
 							if (cell->hasPort(ID(it))) {
 								int width = GetSize(cell->getPort(ID(it)));
+								printf("width %s %s %d\n", cell_type.c_str(), it.c_str(), width);
+								printf("port %s %d\n", cell->getPort(ID(it)).as_string().c_str(), width);
 								widths.push_back(width);
 							} else {
 								widths.push_back(0);
 							}
 						}
+						printf("widths %s %d %d\n", cell_type.c_str(), widths.size(), widths.at(0));
 					}
+					
 					if (cell_data.double_parameter_area.size() > 0) {
 						if (!cell_area.count(cell_type)) {
 							cell_area[cell_type]=cell_data;
@@ -566,22 +570,22 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 			for (const auto& s : dar->args) {
 
 				//printf("value: %s\n",sar->value.c_str());
-				printf("args1: %s\n",dar->args[0].c_str());
+				//printf("args1: %s\n",dar->args[0].c_str());
 
 				vector<string> sub_array;
 				std::string::size_type start = 0;
-				std::string::size_type end = s.find_first_of(" ,", start);
+				std::string::size_type end = s.find_first_of(",", start);
 				while (end != std::string::npos) {
 					sub_array.push_back(s.substr(start, end - start));
 					start = end + 1;
-					end = s.find_first_of(" ,", start);
+					end = s.find_first_of(",", start);
 				}
 				sub_array.push_back(s.substr(start, end));
 
 				vector<double> cast_sub_array;
 				for (const auto& s : sub_array) {
 					double value = 0;
-					auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+					auto [ptr, ec] = std::from_chars(s.data()+1, s.data() + s.size(), value);
 					if (ec != std::errc() || ptr != s.data() + s.size())
 						break;
 					cast_sub_array.push_back(value);
@@ -595,6 +599,7 @@ void read_liberty_cellarea(dict<IdString, cell_area_t> &cell_area, string libert
 		if (par != nullptr) {
 			for (const auto& s : par->args) {
 				port_names.push_back(s);
+				printf("port_name: '%s'\n",s.c_str());
 			}
 		}
 
