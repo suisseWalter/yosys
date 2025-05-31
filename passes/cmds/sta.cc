@@ -18,24 +18,25 @@
  *
  */
 
-#include "kernel/yosys.h"
+#include "kernel/ff.h"
+#include "kernel/modtools.h"
 #include "kernel/sigtools.h"
 #include "kernel/timinginfo.h"
+#include "kernel/yosys.h"
 #include <deque>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
-struct StaWorker
-{
+struct StaWorker {
 	Design *design;
 	Module *module;
 	SigMap sigmap;
 
 	struct t_data {
-		Cell* driver;
+		Cell *driver;
 		IdString dst_port, src_port;
-		vector<tuple<SigBit,int,IdString>> fanouts;
+		vector<tuple<SigBit, int, IdString>> fanouts;
 		SigBit backtrack;
 		t_data() : driver(nullptr) {}
 	};
@@ -60,8 +61,7 @@ struct StaWorker
 
 		pool<IdString> unrecognised_cells;
 
-		for (auto cell : module->cells())
-		{
+		for (auto cell : module->cells()) {
 			Module *inst_module = design->module(cell->type);
 			if (!inst_module) {
 				if (unrecognised_cells.insert(cell->type).second)
@@ -88,7 +88,7 @@ struct StaWorker
 			if (t.comb.empty() && t.arrival.empty() && t.required.empty())
 				continue;
 
-			pool<std::pair<SigBit,TimingInfo::NameBit>> src_bits, dst_bits;
+			pool<std::pair<SigBit, TimingInfo::NameBit>> src_bits, dst_bits;
 
 			for (auto &conn : cell->connections()) {
 				auto rhs = sigmap(conn.second);
@@ -96,9 +96,9 @@ struct StaWorker
 					const auto &bit = rhs[i];
 					if (!bit.wire)
 						continue;
-					TimingInfo::NameBit namebit(conn.first,i);
+					TimingInfo::NameBit namebit(conn.first, i);
 					if (cell->input(conn.first)) {
-						src_bits.insert(std::make_pair(bit,namebit));
+						src_bits.insert(std::make_pair(bit, namebit));
 
 						auto it = t.required.find(namebit);
 						if (it == t.required.end())
@@ -111,7 +111,7 @@ struct StaWorker
 						}
 					}
 					if (cell->output(conn.first)) {
-						dst_bits.insert(std::make_pair(bit,namebit));
+						dst_bits.insert(std::make_pair(bit, namebit));
 						auto &d = data[bit];
 						d.driver = cell;
 						d.dst_port = conn.first;
@@ -124,7 +124,7 @@ struct StaWorker
 						if (cell->hasPort(s.name)) {
 							auto s_bit = sigmap(cell->getPort(s.name)[s.offset]);
 							if (s_bit.wire)
-								data[s_bit].fanouts.emplace_back(bit,it->second.first,s.name);
+								data[s_bit].fanouts.emplace_back(bit, it->second.first, s.name);
 						}
 					}
 				}
@@ -132,10 +132,10 @@ struct StaWorker
 
 			for (const auto &s : src_bits)
 				for (const auto &d : dst_bits) {
-					auto it = t.comb.find(TimingInfo::BitBit(s.second,d.second));
+					auto it = t.comb.find(TimingInfo::BitBit(s.second, d.second));
 					if (it == t.comb.end())
 						continue;
-					data[s.first].fanouts.emplace_back(d.first,it->second,s.second.name);
+					data[s.first].fanouts.emplace_back(d.first, it->second, s.second.name);
 				}
 		}
 
@@ -164,7 +164,7 @@ struct StaWorker
 			auto it = data.find(b);
 			if (it == data.end())
 				continue;
-			const auto& src_arrivals = b.wire->get_intvec_attribute(ID::sta_arrival);
+			const auto &src_arrivals = b.wire->get_intvec_attribute(ID::sta_arrival);
 			log_assert(GetSize(src_arrivals) == GetSize(b.wire));
 			auto src_arrival = src_arrivals[b.offset];
 			for (const auto &d : it->second.fanouts) {
@@ -216,9 +216,9 @@ struct StaWorker
 			int arrival = b.wire->get_intvec_attribute(ID::sta_arrival)[b.offset];
 			if (jt->second.driver) {
 				log("           %s\n", log_signal(b));
-				log("  %6d %s (%s.%s->%s)\n", arrival, log_id(jt->second.driver), log_id(jt->second.driver->type), log_id(jt->second.src_port), log_id(jt->second.dst_port));
-			}
-			else if (b.wire->port_input)
+				log("  %6d %s (%s.%s->%s)\n", arrival, log_id(jt->second.driver), log_id(jt->second.driver->type),
+				    log_id(jt->second.src_port), log_id(jt->second.dst_port));
+			} else if (b.wire->port_input)
 				log("  %6d   %s (%s)\n", arrival, log_signal(b), "<primary input>");
 			else
 				log_abort();
@@ -265,16 +265,204 @@ struct StaWorker
 			log("Arrival histogram:\n");
 			log(" legend: * represents %d endpoint(s)\n", max_freq / bar_width);
 			log("         + represents [1,%d) endpoint(s)\n", max_freq / bar_width);
-			for (int i = num_bins-1; i >= 0; --i)
+			for (int i = num_bins - 1; i >= 0; --i)
 				log("(%6d, %6d] |%s%c\n", min_arrival + bin_size * (i + 1), min_arrival + bin_size * i,
-						std::string(bins[i] * bar_width / max_freq, '*').c_str(),
-						(bins[i] * bar_width) % max_freq > 0 ? '+' : ' ');
+				    std::string(bins[i] * bar_width / max_freq, '*').c_str(), (bins[i] * bar_width) % max_freq > 0 ? '+' : ' ');
 		}
+	}
+};
+struct Sta_Path {
+		double delay;
+		RTLIL::IdString wire;
+		vector<Cell *> cells;
+		Sta_Path(double d, RTLIL::IdString p, vector<Cell *> c) : delay(d), wire(p), cells(c) {}
+		Hasher hash_into(Hasher h) const
+		{
+			//h.eat(delay); //the delay is not required for the hash, as it's a result of the cells. 
+			//h.eat(wire);
+			for (auto &cell : cells)
+				h.eat(cell->name);
+			return h;
+		}
+		bool operator==(const Sta_Path &other) const
+		{
+			return delay == other.delay && wire == other.wire && cells == other.cells;
+		}
+	};
+struct Sta2Worker {
+	Design *design;
+	std::deque<Sta_Path> queue;
+	std::map<RTLIL::IdString, double> analysed;
+	std::map<RTLIL::IdString, double> cell_max_analysed;
+	std::map<RTLIL::IdString, double> cell_min_analysed;
+	std::map<RTLIL::Module *, ModWalker> modwalkers;
+	
+	
+	Sta2Worker(RTLIL::Design *design) : design(design) {}
+
+	void run()
+	{
+		// iterate through all the ff/latches/input in the design and trace the outputs. to another ff/latch/output
+		// printf("design: %s \n", design->top_module()->name.c_str());
+		auto modules = design->modules();
+
+		printf("modules: %d", modules.size());
+		for (auto module : design->modules()) {
+			SigMap sigmap(module);
+			ModWalker modwalker(design);
+			modwalker.setup(module);
+			printf("module: %s \n", module->name.c_str());
+			for (auto port : module->ports) {
+				auto wire = module->wire(port);
+				if (wire->port_input) {
+					printf("input port: %s \n", port.c_str());
+					for (auto &bit : sigmap(wire)) {
+
+						auto first_cells = modwalker.signal_consumers[bit];
+						for (auto &f_cell : first_cells) {
+							if (f_cell.cell == nullptr) {
+								printf("no cell for input port %s \n", port.c_str());
+								continue;
+							}
+
+							vector<Cell *> new_vector = {f_cell.cell};
+							Sta_Path p(0, f_cell.cell->name, new_vector);
+							queue.push_back(p);
+						}
+					}
+				}
+			}
+			for (auto cell : module->cells()) {
+				printf("cell: %s \n", cell->name.c_str());
+				// improve this detection to include FF from lib files.
+				if (RTLIL::builtin_ff_cell_types().count(cell->type)) {
+					vector<Cell *> new_vector;
+					new_vector.push_back(cell);
+					Sta_Path p(0, cell->name, new_vector);
+					queue.push_back(p);
+				}
+			}
+
+			while (queue.size() > 0) {
+				auto entry = queue.back();
+				queue.pop_back();
+				auto cell = entry.cells.back();
+
+				// printf("analysing cell: %s %f \n", cell->name.c_str(), entry.first);
+				if (design->module(cell->type) == nullptr) {
+					// printf("cell %s is just a cell. \n", cell->name.c_str());
+
+				} else if (design->module(cell->type)->get_blackbox_attribute()) {
+					printf("cell %s is a blackbox. \n", cell->name.c_str());
+					continue;
+				}
+
+				auto signals = modwalker.cell_outputs[cell];
+				for (auto sig : signals) {
+					auto consumers = modwalker.signal_consumers[sig];
+					// figure out if we have reached a output cell.
+					if (sig.wire->port_output) {
+							// if we have reached a output port, print it.
+							printf("output port: %s \n", sig.wire->name.c_str());
+						}
+					
+					
+					if (consumers.empty()) {
+						printf("no consumers for %s \n", cell->name.c_str());
+						
+						continue;
+					}
+					
+
+					Yosys::RTLIL::Cell *last_consumer = nullptr;
+					for (auto &consumer_bit : consumers) {
+
+						auto consumer = consumer_bit.cell;
+						if (consumer == last_consumer) {
+							// skip the same consumer, this can happen if multiple bits are connected to the same cell.
+							continue;
+						}
+						last_consumer = consumer;
+						double delay = entry.delay + 1;
+						// if we have already reached this cell skip it if between max or min.
+						if (cell_max_analysed.count(consumer->name) && cell_max_analysed[consumer->name] > entry.delay) {
+							/* printf("skipping %s, already reached with %f \n", consumer->name.c_str(),
+							       cell_max_analysed[consumer->name]); */
+							continue;
+						} else {
+							cell_max_analysed[consumer->name] = delay;
+						}
+						if (cell_min_analysed.count(consumer->name) && cell_min_analysed[consumer->name] < entry.delay) {
+							/* printf("skipping %s, already reached with %f \n", consumer->name.c_str(),
+							       cell_min_analysed[consumer->name]); */
+							continue;
+						} else {
+							cell_min_analysed[consumer->name] = delay;
+						}
+						// we have found a cell that is connected.
+						if (RTLIL::builtin_ff_cell_types().count(consumer->type)) {
+							if (analysed.count(entry.cells.front()->name)) {
+								analysed[consumer->name] = max(analysed[consumer->name], entry.delay);
+							} else {
+								analysed[consumer->name] = entry.delay;
+							}
+							printf("reached ff: %s %f \n", consumer->name.c_str(), entry.delay);
+							/*for (auto interl_walked_cell : entry.second){
+								printf("%s -> ", interl_walked_cell->name.c_str());
+							}
+							printf("\n");
+							if (entry.first > 2){
+								printf("exiting \n");
+								exit(1);
+							} */
+						} else {
+							// check for loops.
+							auto loop = false;
+							for (auto &it : entry.cells) {
+								if (it->name == consumer->name) {
+									printf("loop detected: %s %s \n", cell->name.c_str(), consumer->name.c_str());
+									loop = true;
+								}
+							}
+							if (loop)
+								continue;
+							// printf("putting back on stack: %s %s %d \n", consumer->name.c_str(), cell->name.c_str(),
+							//        entry.second.size()); // make a copy first
+
+							Sta_Path copy(entry.delay, entry.wire, entry.cells);
+							copy.cells.push_back(consumer);
+							copy.delay = delay;
+							queue.push_back(copy);
+							// printf("%u \n", queue.size());
+						}
+					}
+				}
+			}
+		}
+
+		// print max and min of analysed paths.
+		printf("analysed paths: %d \n", analysed.size());
+		double max = 0;
+		RTLIL::IdString max_cell;
+		double min = 1000000;
+		RTLIL::IdString min_cell;
+		for (auto &it : analysed) {
+			if (it.second > max) {
+				max = it.second;
+				max_cell = it.first;
+			}
+			if (it.second < min) {
+				min = it.second;
+				min_cell = it.first;
+			}
+		}
+		printf("max: %s %f \n", max_cell.c_str(), max);
+		printf("min: %s %f \n", min_cell.c_str(), min);
 	}
 };
 
 struct StaPass : public Pass {
-	StaPass() : Pass("sta", "perform static timing analysis") { }
+	StaPass() : Pass("sta", "perform static timing analysis") {}
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -289,6 +477,8 @@ struct StaPass : public Pass {
 	{
 		log_header(design, "Executing STA pass (static timing analysis).\n");
 
+		Sta2Worker sta(design);
+		sta.run();
 		/*
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
@@ -298,17 +488,6 @@ struct StaPass : public Pass {
 			break;
 		}
 		*/
-
-		extra_args(args, 1, design);
-
-		for (Module *module : design->selected_modules())
-		{
-			if (module->has_processes_warn())
-				continue;
-
-			StaWorker worker(module);
-			worker.run();
-		}
 	}
 } StaPass;
 
