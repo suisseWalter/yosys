@@ -59,10 +59,12 @@ struct statdata_t {
 	int num_local_cells = 0;
 	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_local_cells_by_type;
 	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> local_cells_area_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> local_seq_cells_area_by_type;
 	string tech;
 
 	std::map<RTLIL::IdString, unsigned int, RTLIL::sort_by_id_str> num_cells_by_type;
 	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> cells_area_by_type;
+	std::map<RTLIL::IdString, double, RTLIL::sort_by_id_str> cells_seq_area_by_type;
 	std::set<RTLIL::IdString> unknown_cell_area;
 
 	statdata_t operator+(const statdata_t &other) const
@@ -107,6 +109,12 @@ struct statdata_t {
 				cells_area_by_type[it.first] += it.second;
 			else
 				cells_area_by_type[it.first] = it.second;
+		}
+		for (auto &it : other.cells_seq_area_by_type) {
+			if (cells_seq_area_by_type.count(it.first))
+				cells_seq_area_by_type[it.first] += it.second;
+			else
+				cells_seq_area_by_type[it.first] = it.second;
 		}
 		return *this;
 	}
@@ -200,9 +208,12 @@ struct statdata_t {
 						}
 						if (cell_data.single_parameter_area.size() > max_width-1) {
 							cell_area.at(cell_type).area = cell_data.single_parameter_area.at(max_width-1);
+							cell_area.at(cell_type).is_sequential = cell_data.is_sequential;
+
 						} else {
 							printf("too small single_parameter_area %s %d %f\n", cell_type.c_str(), max_width, cell_data.single_parameter_area.back());
 							cell_area.at(cell_type).area = cell_data.single_parameter_area.back();
+							cell_area.at(cell_type).is_sequential = cell_data.is_sequential;
 						}
 						//printf("single_paramter_extraction %s %d %f\n", cell_type.c_str(), max_width, cell_area.at(cell_type).area);
 						
@@ -244,12 +255,15 @@ struct statdata_t {
 							if (width_a > 0 && width_b > 0) {
 								if (cell_data.double_parameter_area.size() > width_a - 1 && cell_data.double_parameter_area.at(width_a - 1).size() > width_b - 1) {
 									cell_area.at(cell_type).area = cell_data.double_parameter_area.at(width_a - 1).at(width_b - 1);
+									cell_area.at(cell_type).is_sequential = cell_data.is_sequential;
 								} else {
 									printf("too small double_parameter_area %s %d %d %f\n", cell_type.c_str(), width_a, width_b, cell_data.double_parameter_area.back().back());
 									cell_area.at(cell_type).area = cell_data.double_parameter_area.back().back();
+									cell_area.at(cell_type).is_sequential = cell_data.is_sequential;
 								}
 							} else {
 								cell_area.at(cell_type).area = cell_data.area;
+								cell_area.at(cell_type).is_sequential = cell_data.is_sequential;
 							}
 						} else {
 							printf("double_paramter_extraction %s %d %f\n", cell_type.c_str(), widths.size(), cell_area.at(cell_type).area);
@@ -268,7 +282,9 @@ struct statdata_t {
 					num_cells++;
 					num_cells_by_type[cell_type]++;
 					cells_area_by_type[cell_type] += cell_data.area;
+					cells_seq_area_by_type[cell_type] += cell_data.is_sequential ? cell_data.area : 0;
 					local_cells_area_by_type[cell_type] += cell_data.area;
+					local_seq_cells_area_by_type[cell_type] += cell_data.is_sequential ? cell_data.area : 0;
 					local_area += cell_data.area;
 					num_local_cells++;
 					num_local_cells_by_type[cell_type]++;
@@ -280,9 +296,11 @@ struct statdata_t {
 				num_cells++;
 				num_cells_by_type[cell_type]++;
 				cells_area_by_type[cell_type] = 0;
+				cells_seq_area_by_type[cell_type] = 0;
 				num_local_cells++;
 				num_local_cells_by_type[cell_type]++;
 				local_cells_area_by_type[cell_type] = 0;
+				local_seq_cells_area_by_type[cell_type] = 0;
 			}
 		}
 
@@ -377,10 +395,10 @@ struct statdata_t {
 
 	void log_data(RTLIL::IdString mod_name, bool top_mod, bool global = false)
 	{
-		log(" %8s-%8s-%8s-%8s----%s\n", "+", "--------", "--------", "--------" , "Hierarchical number of cells, includes all the cells in instances aswell as directly in the module.");
-		log(" %8s %8s-%8s-%8s----%s\n", "|", "+", "--------", "--------","Hierarchical  area, the area including all the instances in the module.");
-		log(" %8s %8s %8s-%8s----%s\n", "|", "|", "+", "--------","Local number of cells, only the cells directly in the module.");
-		log(" %8s %8s %8s %8s----%s\n", "|", "|", "|", "+","Local area, the area of the cells directly in the module. ");
+		log(" %8s-%8s-%8s-%8s-%s\n", "+", "--------", "--------", "--------" , "Count including submodules.");
+		log(" %8s %8s-%8s-%8s-%s\n", "|", "+", "--------", "--------","Area including submodules.");
+		log(" %8s %8s %8s-%8s-%s\n", "|", "|", "+", "--------","Local count, excluding submodules.");
+		log(" %8s %8s %8s %8s-%s\n", "|", "|", "|", "+","Local area, excluding submodules.");
 		log(" %8s %8s %8s %8s \n", "|", "|", "|", "|");
 		print_log_line("wires", 0, 0, num_wires, 0);
 		print_log_line("wire bits", 0, 0, num_wire_bits, 0);
