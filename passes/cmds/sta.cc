@@ -23,10 +23,23 @@
 #include "kernel/sigtools.h"
 #include "kernel/timinginfo.h"
 #include "kernel/yosys.h"
+#include "passes/techmap/libparse.h"
+#include "libs/json11/json11.hpp"
+#include "kernel/cost.h"
+#include "kernel/gzip.h"
+#include <charconv>
 #include <deque>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
+
+struct cell_delay_t {
+	double delay;
+	bool is_flipflop;
+	vector<double> single_parameter_delay;
+	vector<vector<double>> double_parameter_delay;
+	vector<string> parameter_names;
+};
 
 struct StaWorker {
 	Design *design;
@@ -286,17 +299,32 @@ struct Sta_Path {
 			h.eat(cell->name);
 		return h;
 	}
+	void add_delay(Cell *cell, dict<IdString, cell_delay_t> cell_delays)
+	{
+		if (cell == nullptr) {
+			log_error("Cell is null, cannot add delay.\n");
+		}
+		if (!cell_delays.count(cell->type)) {
+			printf("Cell type %s not found in cell delay map.\n", cell->type.c_str());
+			return ; // return current delay if cell type not found
+		}
+		auto cell_delay = cell_delays.at(cell->type);
+		//TODO: deal with parameterized delays.
+		delay += cell_delay.delay;
+		return ;
+	}
 	bool operator==(const Sta_Path &other) const { return delay == other.delay && wire == other.wire && cells == other.cells; }
 };
 struct Sta2Worker {
 	Design *design;
 	std::deque<Sta_Path> queue;
+	dict<IdString, cell_delay_t> cell_delays;
 	std::map<RTLIL::IdString, std::pair<Sta_Path, Sta_Path>> analysed;
 	std::map<RTLIL::IdString, double> cell_max_analysed;
 	std::map<RTLIL::IdString, double> cell_min_analysed;
 	std::map<RTLIL::Module *, ModWalker> modwalkers;
 
-	Sta2Worker(RTLIL::Design *design) : design(design) {}
+	Sta2Worker(RTLIL::Design *design, dict<IdString, cell_delay_t> cell_delay) : design(design), cell_delays(cell_delay){}
 
 	void run(RTLIL::Module *module)
 	{
@@ -325,6 +353,7 @@ struct Sta2Worker {
 
 							vector<Cell *> new_vector = {f_cell.cell};
 							Sta_Path p(0, f_cell.cell->name, new_vector);
+							p.add_delay(f_cell.cell, cell_delays);
 							queue.push_back(p);
 						}
 					}
@@ -333,7 +362,7 @@ struct Sta2Worker {
 			for (auto cell : module->cells()) {
 				// printf("cell: %s \n", cell->name.c_str());
 				//  improve this detection to include FF from lib files.
-				if (RTLIL::builtin_ff_cell_types().count(cell->type)) {
+				if (RTLIL::builtin_ff_cell_types().count(cell->type) || (cell_delays.count(cell->type) && cell_delays.at(cell->type).is_flipflop)) {
 					vector<Cell *> new_vector;
 					new_vector.push_back(cell);
 					Sta_Path p(0, cell->name, new_vector);
@@ -390,7 +419,7 @@ struct Sta2Worker {
 							continue;
 						}
 						last_consumer = consumer;
-						double delay = entry.delay + 1;
+						double delay = entry.delay + 1; //TODO fix this
 						// if we have already reached this cell skip it if between max or min.
 						if (cell_max_analysed.count(consumer->name) && cell_max_analysed[consumer->name] > entry.delay) {
 							if (cell_min_analysed.count(consumer->name) && cell_min_analysed[consumer->name] < entry.delay) {
@@ -402,11 +431,11 @@ struct Sta2Worker {
 							cell_max_analysed[consumer->name] = delay;
 						}
 
-						Sta_Path new_entry(entry.delay, entry.wire, std::vector<Cell*>(entry.cells));
-							new_entry.cells.push_back(consumer);
-							new_entry.delay = delay;
+						Sta_Path new_entry(entry.delay, entry.wire, entry.cells);
+						new_entry.cells.push_back(consumer);
+						new_entry.add_delay(consumer, cell_delays);
 						// we have found a cell that is connected.
-						if (RTLIL::builtin_ff_cell_types().count(consumer->type)) {
+						if (RTLIL::builtin_ff_cell_types().count(consumer->type) || (cell_delays.count(cell->type) && cell_delays.at(cell->type).is_flipflop)) {
 							if (analysed.count(entry.cells.front()->name)) {
 								
 								if (analysed[consumer->name].second.delay < new_entry.delay) {
@@ -475,13 +504,13 @@ struct Sta2Worker {
 			}
 		}
 
-		printf("max: %s %f \n", max_cell.c_str(), max);
+		printf("max: ends at: %s, length: %f, #cells: %u \n", max_cell.c_str(), max,max_path.cells.size());
 		printf("path: ");
 		for (auto &cell : max_path.cells) {
 			printf("%s -> \n", cell->name.c_str());
 		}
 		printf("\n");
-		printf("min: %s %f \n", min_cell.c_str(), min);
+		printf("min: ends at: %s, length: %f, #cells: %u \n", min_cell.c_str(), min,min_path.cells.size());
 		printf("path: ");
 		for (auto &cell : min_path.cells) {
 			printf("%s -> \n", cell->name.c_str());
@@ -489,6 +518,82 @@ struct Sta2Worker {
 		printf("\n");
 	}
 };
+
+void read_liberty_celldelay(dict<IdString, cell_delay_t> &cell_delay, string liberty_file)
+{
+	std::istream *f = uncompressed(liberty_file.c_str());
+	yosys_input_files.insert(liberty_file);
+	LibertyParser libparser(*f, liberty_file);
+	delete f;
+
+	for (auto cell : libparser.ast->children) {
+		if (cell->id != "cell" || cell->args.size() != 1)
+			continue;
+
+		const LibertyAst *ar = cell->find("delay");
+		bool is_flip_flop = cell->find("ff") != nullptr;
+		vector<double> single_parameter_delay;
+		vector<vector<double>> double_parameter_delay;
+		vector<string> port_names;
+		const LibertyAst *sar = cell->find("single_delay_parameterised");
+		if (sar != nullptr ){
+			for (const auto& s : sar->args) {
+				double value = 0;
+				auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+				// ec != std::errc() means parse error, or ptr didn't consume entire string
+				if (ec != std::errc() || ptr != s.data() + s.size())
+					break;
+				single_parameter_delay.push_back(value);
+			}
+			if (single_parameter_delay.size() == 0)
+				printf("error: %s\n",sar->args[single_parameter_delay.size()-1].c_str());
+				//check if it is a double parameterised delay
+		}
+		const LibertyAst *dar = cell->find("double_delay_parameterised");
+		if (dar != nullptr) {
+			for (const auto& s : dar->args) {
+
+				//printf("value: %s\n",sar->value.c_str());
+				//printf("args1: %s\n",dar->args[0].c_str());
+
+				vector<string> sub_array;
+				std::string::size_type start = 0;
+				std::string::size_type end = s.find_first_of(",", start);
+				while (end != std::string::npos) {
+					sub_array.push_back(s.substr(start, end - start));
+					start = end + 1;
+					end = s.find_first_of(",", start);
+				}
+				sub_array.push_back(s.substr(start, end));
+
+				vector<double> cast_sub_array;
+				for (const auto& s : sub_array) {
+					double value = 0;
+					auto [ptr, ec] = std::from_chars(s.data()+1, s.data() + s.size(), value);
+					if (ec != std::errc() || ptr != s.data() + s.size())
+						break;
+					cast_sub_array.push_back(value);
+				}
+				double_parameter_delay.push_back(cast_sub_array);
+				if (cast_sub_array.size() == 0)
+					printf("error: %s\n",s.c_str());
+			}
+		}
+		const LibertyAst *par = cell->find("port_names");
+		if (par != nullptr) {
+			for (const auto& s : par->args) {
+				port_names.push_back(s);
+				printf("port_name: '%s'\n",s.c_str());
+			}
+		}
+
+		if (ar != nullptr && !ar->value.empty()) {
+			string prefix = cell->args[0].substr(0, 1) == "$" ? "" : "\\";
+			cell_delay[prefix + cell->args[0]] = {atof(ar->value.c_str()), is_flip_flop,single_parameter_delay,double_parameter_delay,port_names};
+		}
+
+	}
+}
 
 struct StaPass : public Pass {
 	StaPass() : Pass("sta", "perform static timing analysis") {}
@@ -505,11 +610,28 @@ struct StaPass : public Pass {
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing STA pass (static timing analysis).\n");
-		IdString module_name = args.size() > 1 ? RTLIL::escape_id(args[1]) : design->top_module()->name;
-		auto selected_module = design->module(module_name);
-		if (selected_module == nullptr) {
-			log_cmd_error("Module %s does not exist in the design.\n", log_id(module_name));
+		RTLIL::Module *top_mod = design->top_module();
+		dict<IdString, cell_delay_t> cell_delay;
+		size_t argidx;
+		for (argidx = 1; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-liberty" && argidx + 1 < args.size()) {
+				string liberty_file = args[++argidx];
+				rewrite_filename(liberty_file);
+				read_liberty_celldelay(cell_delay, liberty_file);
+				continue;
+			}
+			if (args[argidx] == "-top" && argidx + 1 < args.size()) {
+				if (design->module(RTLIL::escape_id(args[argidx + 1])) == nullptr)
+					log_cmd_error("Can't find module %s.\n", args[argidx + 1].c_str());
+				top_mod = design->module(RTLIL::escape_id(args[++argidx]));
+
+				continue;
+			}
+			break;
 		}
+		extra_args(args, argidx, design);
+		
+		
 		RTLIL::Design *new_design = new RTLIL::Design;
 		auto modules = design->modules().to_vector();
 		for (auto &mod : modules) {
@@ -519,7 +641,7 @@ struct StaPass : public Pass {
 				cell->set_bool_attribute(ID::keep_hierarchy, false);
 			}
 		}
-		Pass::call(new_design, "hierarchy -check -top "+module_name.str());
+		Pass::call(new_design, "hierarchy -check -top "+top_mod->name.str());
 		Pass::call(new_design, "flatten");
 		//yosys dump -m -o "out/poststa.dump" 
 		Pass::call(new_design, "dump -m -o \"out/poststa.dump\"");
@@ -528,9 +650,9 @@ struct StaPass : public Pass {
 		
 		printf("original design number of modules: %d \n", design->modules().size());
 
-		Sta2Worker sta(new_design);
+		Sta2Worker sta(new_design,cell_delay);
 
-		sta.run(new_design->module(module_name));
+		sta.run(new_design->module(top_mod->name));
 		/*
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
