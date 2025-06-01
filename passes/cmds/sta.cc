@@ -272,42 +272,40 @@ struct StaWorker {
 	}
 };
 struct Sta_Path {
-		double delay;
-		RTLIL::IdString wire;
-		vector<Cell *> cells;
-		Sta_Path(double d, RTLIL::IdString p, vector<Cell *> c) : delay(d), wire(p), cells(c) {}
-		Hasher hash_into(Hasher h) const
-		{
-			//h.eat(delay); //the delay is not required for the hash, as it's a result of the cells. 
-			//h.eat(wire);
-			for (auto &cell : cells)
-				h.eat(cell->name);
-			return h;
-		}
-		bool operator==(const Sta_Path &other) const
-		{
-			return delay == other.delay && wire == other.wire && cells == other.cells;
-		}
-	};
+	double delay;
+	RTLIL::IdString wire;
+	vector<Cell *> cells;
+	Sta_Path(double d, RTLIL::IdString p, vector<Cell *> c) : delay(d), wire(p), cells(c) {}
+	Sta_Path() : delay(0), wire(), cells() {}
+	Sta_Path(const Sta_Path &other) : delay(other.delay), wire(other.wire), cells(other.cells) {}
+	Hasher hash_into(Hasher h) const
+	{
+		// h.eat(delay); //the delay is not required for the hash, as it's a result of the cells.
+		// h.eat(wire);
+		for (auto &cell : cells)
+			h.eat(cell->name);
+		return h;
+	}
+	bool operator==(const Sta_Path &other) const { return delay == other.delay && wire == other.wire && cells == other.cells; }
+};
 struct Sta2Worker {
 	Design *design;
 	std::deque<Sta_Path> queue;
-	std::map<RTLIL::IdString, double> analysed;
+	std::map<RTLIL::IdString, std::pair<Sta_Path, Sta_Path>> analysed;
 	std::map<RTLIL::IdString, double> cell_max_analysed;
 	std::map<RTLIL::IdString, double> cell_min_analysed;
 	std::map<RTLIL::Module *, ModWalker> modwalkers;
-	
-	
+
 	Sta2Worker(RTLIL::Design *design) : design(design) {}
 
-	void run()
+	void run(RTLIL::Module *module)
 	{
-		// iterate through all the ff/latches/input in the design and trace the outputs. to another ff/latch/output
-		// printf("design: %s \n", design->top_module()->name.c_str());
-		auto modules = design->modules();
-
-		printf("modules: %d", modules.size());
-		for (auto module : design->modules()) {
+		auto modules = design->modules().to_vector();
+		if (module != nullptr) {
+			modules = {module};
+		}
+		printf("modules: %d \n", modules.size());
+		for (auto module : modules) {
 			SigMap sigmap(module);
 			ModWalker modwalker(design);
 			modwalker.setup(module);
@@ -315,7 +313,7 @@ struct Sta2Worker {
 			for (auto port : module->ports) {
 				auto wire = module->wire(port);
 				if (wire->port_input) {
-					printf("input port: %s \n", port.c_str());
+					// printf("input port: %s \n", port.c_str());
 					for (auto &bit : sigmap(wire)) {
 
 						auto first_cells = modwalker.signal_consumers[bit];
@@ -333,27 +331,27 @@ struct Sta2Worker {
 				}
 			}
 			for (auto cell : module->cells()) {
-				printf("cell: %s \n", cell->name.c_str());
-				// improve this detection to include FF from lib files.
+				// printf("cell: %s \n", cell->name.c_str());
+				//  improve this detection to include FF from lib files.
 				if (RTLIL::builtin_ff_cell_types().count(cell->type)) {
 					vector<Cell *> new_vector;
 					new_vector.push_back(cell);
 					Sta_Path p(0, cell->name, new_vector);
 					queue.push_back(p);
 				}
-			}
+			
 
 			while (queue.size() > 0) {
 				auto entry = queue.back();
 				queue.pop_back();
 				auto cell = entry.cells.back();
 
-				// printf("analysing cell: %s %f \n", cell->name.c_str(), entry.first);
+				// printf("analysing cell: %s %f \n", cell->name.c_str(), entry.delay);
 				if (design->module(cell->type) == nullptr) {
 					// printf("cell %s is just a cell. \n", cell->name.c_str());
 
 				} else if (design->module(cell->type)->get_blackbox_attribute()) {
-					printf("cell %s is a blackbox. \n", cell->name.c_str());
+					//printf("cell %s is a blackbox. \n", cell->name.c_str());
 					continue;
 				}
 
@@ -362,17 +360,26 @@ struct Sta2Worker {
 					auto consumers = modwalker.signal_consumers[sig];
 					// figure out if we have reached a output cell.
 					if (sig.wire->port_output) {
-							// if we have reached a output port, print it.
-							printf("output port: %s \n", sig.wire->name.c_str());
+						// if we have reached a output port, print it.
+						printf("output port: %s \n", sig.wire->name.c_str());
+						if (analysed.count(sig.wire->name)) {
+							if (analysed[sig.wire->name].second.delay < entry.delay) {
+								// reached new maximum delay for this cell.
+								analysed[sig.wire->name].second = entry;
+							} else if (analysed[sig.wire->name].first.delay > entry.delay) {
+								// reached new minimum delay for this cell.
+								analysed[sig.wire->name].first = entry;
+							}
+						} else {
+							analysed[sig.wire->name] = pair<Sta_Path, Sta_Path>(entry, entry);
 						}
-					
-					
+					}
+
 					if (consumers.empty()) {
-						printf("no consumers for %s \n", cell->name.c_str());
-						
+						// printf("no consumers for %s \n", cell->name.c_str());
+
 						continue;
 					}
-					
 
 					Yosys::RTLIL::Cell *last_consumer = nullptr;
 					for (auto &consumer_bit : consumers) {
@@ -386,27 +393,36 @@ struct Sta2Worker {
 						double delay = entry.delay + 1;
 						// if we have already reached this cell skip it if between max or min.
 						if (cell_max_analysed.count(consumer->name) && cell_max_analysed[consumer->name] > entry.delay) {
-							/* printf("skipping %s, already reached with %f \n", consumer->name.c_str(),
-							       cell_max_analysed[consumer->name]); */
-							continue;
+							if (cell_min_analysed.count(consumer->name) && cell_min_analysed[consumer->name] < entry.delay) {
+								continue;
+							} else {
+								cell_min_analysed[consumer->name] = delay;
+							}
 						} else {
 							cell_max_analysed[consumer->name] = delay;
 						}
-						if (cell_min_analysed.count(consumer->name) && cell_min_analysed[consumer->name] < entry.delay) {
-							/* printf("skipping %s, already reached with %f \n", consumer->name.c_str(),
-							       cell_min_analysed[consumer->name]); */
-							continue;
-						} else {
-							cell_min_analysed[consumer->name] = delay;
-						}
+
+						Sta_Path new_entry(entry.delay, entry.wire, std::vector<Cell*>(entry.cells));
+							new_entry.cells.push_back(consumer);
+							new_entry.delay = delay;
 						// we have found a cell that is connected.
 						if (RTLIL::builtin_ff_cell_types().count(consumer->type)) {
 							if (analysed.count(entry.cells.front()->name)) {
-								analysed[consumer->name] = max(analysed[consumer->name], entry.delay);
+								
+								if (analysed[consumer->name].second.delay < new_entry.delay) {
+									// reached new maximum delay for this cell.
+									analysed[consumer->name].second = new_entry;
+									continue;
+								} else if (analysed[consumer->name].first.delay > new_entry.delay) {
+									// reached new minimum delay for this cell.
+									analysed[consumer->name].first = new_entry;
+									continue;
+								}
 							} else {
-								analysed[consumer->name] = entry.delay;
+								
+								analysed[consumer->name] = pair<Sta_Path, Sta_Path>(new_entry, new_entry);
 							}
-							printf("reached ff: %s %f \n", consumer->name.c_str(), entry.delay);
+							// printf("reached ff: %s %f \n", consumer->name.c_str(), entry.delay);
 							/*for (auto interl_walked_cell : entry.second){
 								printf("%s -> ", interl_walked_cell->name.c_str());
 							}
@@ -422,42 +438,55 @@ struct Sta2Worker {
 								if (it->name == consumer->name) {
 									printf("loop detected: %s %s \n", cell->name.c_str(), consumer->name.c_str());
 									loop = true;
+									break;
 								}
 							}
 							if (loop)
 								continue;
 							// printf("putting back on stack: %s %s %d \n", consumer->name.c_str(), cell->name.c_str(),
 							//        entry.second.size()); // make a copy first
-
-							Sta_Path copy(entry.delay, entry.wire, entry.cells);
-							copy.cells.push_back(consumer);
-							copy.delay = delay;
-							queue.push_back(copy);
-							// printf("%u \n", queue.size());
+							
+							queue.push_back(new_entry);
+							//printf("%u \n", queue.size());
 						}
 					}
 				}
 			}
 		}
-
+		}
 		// print max and min of analysed paths.
 		printf("analysed paths: %d \n", analysed.size());
 		double max = 0;
 		RTLIL::IdString max_cell;
+		Sta_Path max_path;
 		double min = 1000000;
 		RTLIL::IdString min_cell;
+		Sta_Path min_path;
 		for (auto &it : analysed) {
-			if (it.second > max) {
-				max = it.second;
+			if (it.second.second.delay > max) {
+				max = it.second.second.delay;
 				max_cell = it.first;
+				max_path = it.second.second;
 			}
-			if (it.second < min) {
-				min = it.second;
+			if (it.second.first.delay < min) {
+				min = it.second.first.delay;
 				min_cell = it.first;
+				min_path = it.second.first;
 			}
 		}
+
 		printf("max: %s %f \n", max_cell.c_str(), max);
+		printf("path: ");
+		for (auto &cell : max_path.cells) {
+			printf("%s -> \n", cell->name.c_str());
+		}
+		printf("\n");
 		printf("min: %s %f \n", min_cell.c_str(), min);
+		printf("path: ");
+		for (auto &cell : min_path.cells) {
+			printf("%s -> \n", cell->name.c_str());
+		}
+		printf("\n");
 	}
 };
 
@@ -476,9 +505,32 @@ struct StaPass : public Pass {
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing STA pass (static timing analysis).\n");
+		IdString module_name = args.size() > 1 ? RTLIL::escape_id(args[1]) : design->top_module()->name;
+		auto selected_module = design->module(module_name);
+		if (selected_module == nullptr) {
+			log_cmd_error("Module %s does not exist in the design.\n", log_id(module_name));
+		}
+		RTLIL::Design *new_design = new RTLIL::Design;
+		auto modules = design->modules().to_vector();
+		for (auto &mod : modules) {
+			new_design->add(mod->clone());
+			auto cells = new_design->module(mod->name)->cells().to_vector();
+			for (auto &cell : cells) {
+				cell->set_bool_attribute(ID::keep_hierarchy, false);
+			}
+		}
+		Pass::call(new_design, "hierarchy -check -top "+module_name.str());
+		Pass::call(new_design, "flatten");
+		//yosys dump -m -o "out/poststa.dump" 
+		Pass::call(new_design, "dump -m -o \"out/poststa.dump\"");
+		// Pass::call(design, "opt_clean");
+		//yosys hierarchy -check -top $top_design
+		
+		printf("original design number of modules: %d \n", design->modules().size());
 
-		Sta2Worker sta(design);
-		sta.run();
+		Sta2Worker sta(new_design);
+
+		sta.run(new_design->module(module_name));
 		/*
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
