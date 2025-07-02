@@ -359,8 +359,8 @@ struct Sta_Path {
 				// we need to have exactly two parameters for double parameter delay.
 				log_error("Cell %s has double parameter delay, but has %d parameters.\n", cell->name.c_str(), widths.size());
 			}
-			int width_a = widths.at(0);
-			int width_b = widths.at(1);
+			int width_a = widths.at(1);
+			int width_b = widths.at(0);
 			if (width_a > 0 && width_b > 0) {
 				if (cell_delay.double_parameter_delay.size() > width_a - 1 &&
 				    cell_delay.double_parameter_delay.at(width_a - 1).size() > width_b - 1) {
@@ -392,7 +392,7 @@ struct Sta2Worker {
 
 	Sta2Worker(RTLIL::Design *design, dict<IdString, cell_delay_t> cell_delay) : design(design), cell_delays(cell_delay) {}
 
-	void run(RTLIL::Module *module, bool hold_violations, bool setup_violations, double max_delay = 0, double min_delay = 0)
+	void run(RTLIL::Module *module, bool hold_violations, bool setup_violations)
 	{
 		auto modules = design->modules().to_vector();
 		if (module != nullptr) {
@@ -426,12 +426,15 @@ struct Sta2Worker {
 				}
 			}
 			for (auto cell : module->cells()) {
-				// printf("cell: %s \n", cell->name.c_str());
+				//printf("cell: %s, %s, %u \n", cell->name.c_str(), cell->type.c_str(),
+				//       (cell_delays.count(cell->type) ? cell_delays.at(cell->type).is_flipflop : 100));
 				//  improve this detection to include FF from lib files.
-				if (RTLIL::builtin_ff_cell_types().count(cell->type)) {
+				if (RTLIL::builtin_ff_cell_types().count(cell->type) ||
+				    (cell_delays.count(cell->type) && cell_delays.at(cell->type).is_flipflop)) {
 					vector<Cell *> new_vector;
 					new_vector.push_back(cell);
 					Sta_Path p(0, cell->name, new_vector);
+					p.add_delay(cell, cell_delays);
 					queue.push_back(p);
 				} else {
 					continue;
@@ -447,8 +450,12 @@ struct Sta2Worker {
 						// printf("cell %s is just a cell. \n", cell->name.c_str());
 
 					} else if (design->module(cell->type)->get_blackbox_attribute()) {
-						// printf("cell %s is a blackbox. \n", cell->name.c_str());
-						continue;
+						
+						if (!cell_delays.count(cell->type)) {
+							//printf("cell %s is a blackbox without timing information of type %s. \n", cell->name.c_str(), cell->type.c_str());
+							continue;
+						} 
+						
 					}
 					pool<RTLIL::IdString> analysed_cells;
 					auto signals = modwalker.cell_outputs[cell];
@@ -475,14 +482,13 @@ struct Sta2Worker {
 						}
 
 						if (consumers.empty()) {
-							//printf("no consumers for %s \n", cell->name.c_str());
+							// printf("no consumers for %s \n", cell->name.c_str());
 
 							continue;
 						}
-
+						//printf("consumers: %d \n", consumers.size());
 						Yosys::RTLIL::Cell *last_consumer = nullptr;
 						for (auto &consumer_bit : consumers) {
-
 							auto consumer = consumer_bit.cell;
 							if (analysed_cells.count(consumer->name)) {
 								// printf("already analysed cell %s \n", consumer->name.c_str());
@@ -495,6 +501,8 @@ struct Sta2Worker {
 							// if we have already reached this cell skip it if between max or min.
 							if (cell_max_analysed.count(consumer->name) &&
 							    cell_max_analysed[consumer->name] > entry.delay) {
+								if (!hold_violations)
+									continue; // if we are not looking for hold violations, skip this.
 								if (cell_min_analysed.count(consumer->name) &&
 								    cell_min_analysed[consumer->name] < entry.delay) {
 									continue;
@@ -513,27 +521,33 @@ struct Sta2Worker {
 							    (cell_delays.count(consumer->type) && cell_delays.at(consumer->type).is_flipflop)) {
 								// check that we don't have a clk or rst port. In that case we don't want to include
 								// this.
-								//printf("found a FF: %s %f \n", consumer->name.c_str(), new_entry.delay); 
-								FfData ff(nullptr, consumer);
-								/* printf("sig: %d \n", sigmap(sig));
-								printf("ff sig clk: %d \n", sigmap(ff.sig_clk).size());
-								printf("ff sig clr: %d \n", sigmap(ff.sig_clr).size()); */
-								if (sigmap(sig) == sigmap(ff.sig_clk)) {
-									printf("analysing a clk, ignoring: %s \n", consumer->name.c_str());
-									continue;
-								}
-								if (sigmap(ff.sig_clr).size() == 1 && sigmap(sig) == sigmap(ff.sig_clr)) {
-									printf("analysing a rst , ignoring: %s \n", consumer->name.c_str());
-									continue;
+								//printf("found a FF: %s %f \n", consumer->name.c_str(), new_entry.delay);
+								if (RTLIL::builtin_ff_cell_types().count(consumer->type)){
+									FfData ff(nullptr, consumer);
+									/* printf("sig: %d \n", sigmap(sig));
+									printf("ff sig clk: %d \n", sigmap(ff.sig_clk).size());
+									printf("ff sig clr: %d \n", sigmap(ff.sig_clr).size()); */
+									if (sigmap(sig) == sigmap(ff.sig_clk)) {
+										printf("analysing a clk, ignoring: %s \n", consumer->name.c_str());
+										continue;
+									}
+									if (sigmap(ff.sig_clr).size() == 1 && sigmap(sig) == sigmap(ff.sig_clr)) {
+										printf("analysing a rst , ignoring: %s \n", consumer->name.c_str());
+										continue;
+									}
 								}
 								if (analysed.count(entry.cells.front()->name)) {
 
 									if (analysed[consumer->name].second.delay < new_entry.delay) {
 										// reached new maximum delay for this cell.
+										// printf("reached new max delay for %s: %f \n",
+										// consumer->name.c_str(), new_entry.delay);
 										analysed[consumer->name].second = new_entry;
 										continue;
 									} else if (analysed[consumer->name].first.delay > new_entry.delay) {
 										// reached new minimum delay for this cell.
+										// printf("reached new min delay for %s: %f \n",
+										// consumer->name.c_str(), new_entry.delay);
 										analysed[consumer->name].first = new_entry;
 										continue;
 									}
@@ -580,7 +594,7 @@ struct Sta2Worker {
 			}
 		}
 		// print max and min of analysed paths.
-		printf("analysed paths: %d \n", analysed.size());
+		/* printf("analysed paths: %d \n", analysed.size());
 		double max = 0;
 		RTLIL::IdString max_cell;
 		Sta_Path max_path;
@@ -611,7 +625,7 @@ struct Sta2Worker {
 		for (auto &cell : min_path.cells) {
 			log("%s -> \n", cell->name.c_str());
 		}
-		log("\n");
+		log("\n"); */
 	}
 };
 
@@ -708,6 +722,10 @@ struct StaPass : public Pass {
 		log_header(design, "Executing STA pass (static timing analysis).\n");
 		RTLIL::Module *top_mod = design->top_module();
 		dict<IdString, cell_delay_t> cell_delay;
+		bool names = false;
+		bool paths = false;
+		double max_delay = 0;
+		double min_delay = 0;
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-liberty" && argidx + 1 < args.size()) {
@@ -720,7 +738,27 @@ struct StaPass : public Pass {
 				if (design->module(RTLIL::escape_id(args[argidx + 1])) == nullptr)
 					log_cmd_error("Can't find module %s.\n", args[argidx + 1].c_str());
 				top_mod = design->module(RTLIL::escape_id(args[++argidx]));
-
+				continue;
+			}
+			if (args[argidx] == "-max_delay" && argidx + 1 < args.size()) {
+				argidx++;
+				max_delay = atof(args[argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-min_delay" && argidx + 1 < args.size()) {
+				argidx++;
+				min_delay = atof(args[argidx].c_str());
+				continue;
+			}
+			if (args[argidx] == "-v") {
+				log("verbose mode enabled.\n");
+				names = true;
+				continue;
+			}
+			if (args[argidx] == "-vv") {
+				log("very verbose mode enabled.\n");
+				names = true;
+				paths = true;
 				continue;
 			}
 			break;
@@ -748,7 +786,55 @@ struct StaPass : public Pass {
 
 		Sta2Worker sta(new_design, cell_delay);
 
-		sta.run(new_design->module(top_mod->name), 1, 0, 10, 0);
+		sta.run(new_design->module(top_mod->name), min_delay, 1);
+
+		// extract  all the paths longer then max_delay
+		auto max_paths = pool<Sta_Path>();
+		auto min_paths = pool<Sta_Path>();
+		for (auto &it : sta.analysed) {
+			if (it.second.second.delay > max_delay) {
+				max_paths.insert(it.second.second);
+			}
+			if (it.second.first.delay < min_delay) {
+				min_paths.insert(it.second.first);
+			}
+		}
+
+		log("Number of paths longer than max delay %f: %d \n", max_delay, max_paths.size());
+		log("Number of paths shorter than min delay %f: %d \n", min_delay, min_paths.size());
+		//create a ordered version of max_delays and min_delays.
+		auto ordered_max_paths = vector<Sta_Path>(max_paths.begin(), max_paths.end());
+		auto ordered_min_paths = vector<Sta_Path>(min_paths.begin(), min_paths.end());
+		std::sort(ordered_max_paths.begin(), ordered_max_paths.end(),
+			  [](const Sta_Path &a, const Sta_Path &b) { return a.delay > b.delay; });
+		std::sort(ordered_min_paths.begin(), ordered_min_paths.end(),
+			  [](const Sta_Path &a, const Sta_Path &b) { return a.delay < b.delay; });
+		if (names) {
+			for (auto &it : ordered_max_paths) {
+				log("max_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
+				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
+			}
+			for (auto &it : ordered_min_paths) {
+				log("min_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
+				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
+			}
+		}
+		if (paths) {
+			for (auto &it : max_paths) {
+				log("max_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
+				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
+				for (auto &cell : it.cells) {
+					log("  cell: %s -> \n", cell->name.c_str());
+				}
+			}
+			for (auto &it : min_paths) {
+				log("min_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
+				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
+				for (auto &cell : it.cells) {
+					log("  cell: %s -> \n", cell->name.c_str());
+				}
+			}
+		}
 
 		// print all the max and min paths.
 		log("max paths: %d \n", sta.analysed_max_paths.size());
