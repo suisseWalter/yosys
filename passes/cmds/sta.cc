@@ -288,9 +288,10 @@ struct Sta_Path {
 	double delay;
 	RTLIL::IdString wire;
 	vector<Cell *> cells;
-	Sta_Path(double d, RTLIL::IdString p, vector<Cell *> c) : delay(d), wire(p), cells(c) {}
-	Sta_Path() : delay(0), wire(), cells() {}
-	Sta_Path(const Sta_Path &other) : delay(other.delay), wire(other.wire), cells(other.cells) {}
+	vector<double> delays; // delays of the cells in the path, used for debugging and analysis.
+	Sta_Path(double d, RTLIL::IdString p, vector<Cell *> c, vector<double> ds) : delay(d), wire(p), cells(c), delays(ds) {}
+	Sta_Path() : delay(0), wire(), cells(), delays() {}
+	Sta_Path(const Sta_Path &other) : delay(other.delay), wire(other.wire), cells(other.cells), delays(other.delays) {}
 	Hasher hash_into(Hasher h) const
 	{
 		// h.eat(delay); //the delay is not required for the hash, as it's a result of the cells.
@@ -351,8 +352,10 @@ struct Sta_Path {
 			}
 			if (cell_delay.single_parameter_delay.size() > widths.at(0) - 1) {
 				delay += cell_delay.single_parameter_delay.at(widths.at(0) - 1);
+				delays.push_back(cell_delay.single_parameter_delay.at(widths.at(0) - 1));
 			} else {
 				delay += cell_delay.single_parameter_delay.back();
+				delays.push_back(cell_delay.single_parameter_delay.back());
 			}
 		} else if (cell_delay.double_parameter_delay.size() > 0) {
 			if (widths.size() != 2) {
@@ -365,14 +368,17 @@ struct Sta_Path {
 				if (cell_delay.double_parameter_delay.size() > width_a - 1 &&
 				    cell_delay.double_parameter_delay.at(width_a - 1).size() > width_b - 1) {
 					delay += cell_delay.double_parameter_delay.at(width_a - 1).at(width_b - 1);
+					delays.push_back(cell_delay.double_parameter_delay.at(width_a - 1).at(width_b - 1));
 				} else {
 					delay += cell_delay.double_parameter_delay.back().back();
+					delays.push_back(cell_delay.double_parameter_delay.back().back());
 				}
 			} else {
 				log_error("Cell %s has double parameter delay, but has zero width parameters.\n", cell->name.c_str());
 			}
 		} else {
 			delay += cell_delay.delay;
+			delays.push_back(cell_delay.delay);
 		}
 
 		return;
@@ -418,7 +424,7 @@ struct Sta2Worker {
 							}
 
 							vector<Cell *> new_vector = {f_cell.cell};
-							Sta_Path p(0, f_cell.cell->name, new_vector);
+							Sta_Path p(0, f_cell.cell->name, new_vector, vector<double>());
 							p.add_delay(f_cell.cell, cell_delays);
 							queue.push_back(p);
 						}
@@ -433,7 +439,7 @@ struct Sta2Worker {
 				    (cell_delays.count(cell->type) && cell_delays.at(cell->type).is_flipflop)) {
 					vector<Cell *> new_vector;
 					new_vector.push_back(cell);
-					Sta_Path p(0, cell->name, new_vector);
+					Sta_Path p(0, cell->name, new_vector, vector<double>());
 					p.add_delay(cell, cell_delays);
 					queue.push_back(p);
 				} else {
@@ -513,7 +519,7 @@ struct Sta2Worker {
 								cell_max_analysed[consumer->name] = delay;
 							}
 
-							Sta_Path new_entry(entry.delay, entry.wire, entry.cells);
+							Sta_Path new_entry(entry.delay, entry.wire, entry.cells, entry.delays);
 							new_entry.cells.push_back(consumer);
 							new_entry.add_delay(consumer, cell_delays);
 							// we have found a cell that is connected.
@@ -820,14 +826,21 @@ struct StaPass : public Pass {
 			}
 		}
 		if (paths) {
-			for (auto &it : max_paths) {
-				log("max_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
-				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
+			for (auto &it : ordered_max_paths) {
+				log("max_path: start: %s, end: %s, delay: %f, cells: %u , delays_length: %u\n", it.cells.front()->name.c_str(),
+				    it.cells.back()->name.c_str(), it.delay, it.cells.size(), it.delays.size());
+				int i = 0;
 				for (auto &cell : it.cells) {
-					log("  cell: %s -> \n", cell->name.c_str());
+					if (i < 0 || i >= it.delays.size()) {
+						log("  cell: %s , delay: %d-> \n", cell->name.c_str(), 0);
+					} else {
+						log("  cell: %s , delay: %f -> \n", cell->name.c_str(), it.delays.at(i));
+					}
+					
+					i++;
 				}
 			}
-			for (auto &it : min_paths) {
+			for (auto &it : ordered_min_paths) {
 				log("min_path: start: %s, end: %s, delay: %f, cells: %u \n", it.cells.front()->name.c_str(),
 				    it.cells.back()->name.c_str(), it.delay, it.cells.size());
 				for (auto &cell : it.cells) {
@@ -836,7 +849,7 @@ struct StaPass : public Pass {
 			}
 		}
 
-		// print all the max and min paths.
+		/* // print all the max and min paths.
 		log("max paths: %d \n", sta.analysed_max_paths.size());
 		for (auto &path : sta.analysed_max_paths) {
 			log("max path: %s, delay: %f, cells: %u \n", path.wire.c_str(), path.delay, path.cells.size());
@@ -844,7 +857,7 @@ struct StaPass : public Pass {
 		log("min paths: %d \n", sta.analysed_min_paths.size());
 		for (auto &path : sta.analysed_min_paths) {
 			log("min path: %s, delay: %f, cells: %u \n", path.wire.c_str(), path.delay, path.cells.size());
-		}
+		} */
 		/*
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
